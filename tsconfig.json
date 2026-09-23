@@ -1,0 +1,21 @@
+{
+    "extends": "super-configs/tsconfig/node",
+    "compilerOptions": {
+        "rootDir": ".",
+        "outDir": "dist",
+        "noEmit": true,
+        "lib": ["ES2022"],
+        "noUncheckedIndexedAccess": true,
+        "noImplicitOverride": true,
+        "exactOptionalPropertyTypes": false,
+        "isolatedModules": true,
+        "verbatimModuleSyntax": true
+    },
+    "include": [
+        "src/**/*.ts",
+        "test/**/*.ts",
+        "examples/**/*.ts",
+        "*.config.ts",
+        "super-configs.d.ts"
+    ]
+}

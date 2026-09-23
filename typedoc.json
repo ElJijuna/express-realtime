@@ -1,0 +1,9 @@
+{
+    "$schema": "https://typedoc.org/schema.json",
+    "extends": "./node_modules/super-configs/typedoc.json",
+    "entryPoints": ["src/index.ts", "src/client/index.ts"],
+    "out": "docs",
+    "readme": "README.md",
+    "tsconfig": "tsconfig.json",
+    "exclude": ["**/*.test.ts", "test/**", "examples/**"]
+}
