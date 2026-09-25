@@ -133,12 +133,15 @@ describe('createRealtimeClient', () => {
       publicNamespace: false,
       onSessionRevoked,
     });
+    const socket = defined(ana.private);
 
-    await connected(defined(ana.private));
+    await connected(socket);
     server.rt.disconnectUser('1', 'logout');
     await sleep(200);
     expect(onSessionRevoked).toHaveBeenCalledWith('logout');
-    expect(ana.private?.connected).toBe(false);
+    expect(socket.connected).toBe(false);
+    expect(ana.private).toBeNull();
+    expect(ana.loggedIn).toBe(false);
   });
 
   it('rejoins its rooms after reconnecting, except the ones it left or lost access to', async () => {
@@ -301,6 +304,105 @@ describe('createRealtimeClient', () => {
       expect(refreshToken).toHaveBeenCalledOnce();
       expect(eve.status).toBe('offline');
       expect(statuses).toEqual(['offline']);
+    });
+  });
+
+  describe('login and logout', () => {
+    it('opens the private connection for a guest that signs in', async () => {
+      server = await startServer();
+      const guest = client(server.url);
+      const bob = client(server.url, { getToken: () => tokenFor('bob'), publicNamespace: false });
+      const onReconnect = vi.fn();
+
+      guest.onReconnect(onReconnect);
+      // Registered while logged out: kept for the session opened later.
+      const incoming = next(guest.chat.onMessage);
+
+      await Promise.all([connected(defined(guest.public)), connected(defined(bob.private))]);
+      expect(guest.private).toBeNull();
+      expect(guest.loggedIn).toBe(false);
+      await expect(guest.chat.send('2', { text: 'hi' })).rejects.toMatchObject({
+        code: 'unauthorized',
+      });
+
+      await guest.login(() => tokenFor('ana'));
+      expect(guest.loggedIn).toBe(true);
+      expect(guest.private?.connected).toBe(true);
+      expect(guest.status).toBe('connected');
+      expect(onReconnect).not.toHaveBeenCalled();
+
+      await bob.chat.send('1', { text: 'welcome back' });
+      await expect(incoming).resolves.toMatchObject({ from: '2', text: 'welcome back' });
+    });
+
+    it('closes only the private connection on logout and forgets its rooms', async () => {
+      server = await startServer();
+      server.rt.rooms.define('team:red', { access: 'private', canJoin: () => true });
+      const ana = client(server.url, { getToken: () => tokenFor('ana') });
+
+      await Promise.all([connected(defined(ana.public)), connected(defined(ana.private))]);
+      await ana.rooms.join('team:red');
+      ana.logout();
+      expect(ana.private).toBeNull();
+      expect(ana.public?.connected).toBe(true);
+      expect(ana.status).toBe('connected');
+      await expect(ana.call('anything', 1, { scope: 'private' })).rejects.toMatchObject({
+        code: 'unauthorized',
+      });
+
+      await ana.login();
+      await sleep(100);
+      await expect(server.rt.rooms.members('team:red')).resolves.toEqual([]);
+    });
+
+    it('rejects when the server refuses the token', async () => {
+      server = await startServer();
+      const guest = client(server.url);
+
+      await connected(defined(guest.public));
+      await expect(guest.login(() => 'token:nobody')).rejects.toMatchObject({
+        code: 'unauthorized',
+      });
+      expect(guest.loggedIn).toBe(false);
+      expect(guest.private).toBeNull();
+      expect(guest.status).toBe('connected');
+
+      // Retrying with a valid token works.
+      await guest.login(() => tokenFor('ana'));
+      expect(guest.private?.connected).toBe(true);
+    });
+
+    it('signs in again after the session is revoked', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana'), publicNamespace: false });
+
+      await connected(defined(ana.private));
+      server.rt.disconnectUser('1', 'logout');
+      await sleep(200);
+      expect(ana.status).toBe('offline');
+
+      await ana.login();
+      expect(ana.status).toBe('connected');
+      expect(ana.private?.connected).toBe(true);
+    });
+
+    it('is offline without a public namespace until login', async () => {
+      server = await startServer();
+      const ana = client(server.url, { publicNamespace: false });
+
+      expect(ana.status).toBe('offline');
+      await ana.login(() => tokenFor('ana'));
+      expect(ana.status).toBe('connected');
+    });
+
+    it('rejects a pending login when the client is closed', async () => {
+      server = await startServer();
+      const guest = client(server.url);
+      const pending = guest.login(() => tokenFor('ana'));
+
+      guest.close();
+      await expect(pending).rejects.toMatchObject({ code: 'closed' });
+      await expect(guest.login()).rejects.toMatchObject({ code: 'closed' });
     });
   });
 });

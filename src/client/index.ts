@@ -51,7 +51,7 @@ export interface RealtimeClientOptions {
   publicNamespace?: string | false;
   /** Must match the server. Default: `/private`. */
   privateNamespace?: string;
-  /** Opens the private connection. Default: true when `getToken` is set. */
+  /** Opens the private connection on creation. Default: true when `getToken` is set. See `login()`. */
   connectPrivate?: boolean;
   /** Passed to `socket.io-client`, e.g. `{ transports: ['websocket'] }`. */
   socketOptions?: Partial<ManagerOptions & SocketOptions>;
@@ -92,8 +92,21 @@ export type Listener<T> = (value: T) => void;
 export interface RealtimeClient {
   /** Public connection, or `null` when disabled. */
   readonly public: Socket | null;
-  /** Private connection, or `null` when not opened. */
+  /** Private connection, or `null` while logged out. */
   readonly private: Socket | null;
+  /** True between `login()` (or `connectPrivate`) and `logout()` or a revoked session. */
+  readonly loggedIn: boolean;
+  /**
+   * Opens the private connection, e.g. after the user signs in. Resolves once connected and
+   * rejects with a `RealtimeClientError` when the server refuses the token. Pass `getToken` to
+   * replace the one given in the options. Does nothing when already logged in.
+   */
+  login: (getToken?: RealtimeClientOptions['getToken']) => Promise<void>;
+  /**
+   * Closes the private connection and keeps the public one. Rooms joined through the private
+   * connection are forgotten. Listeners (`chat.onMessage`, ...) are kept for the next `login()`.
+   */
+  logout: () => void;
   /** Current connection status. */
   readonly status: ConnectionStatus;
   /** Called whenever `status` changes. */
@@ -163,12 +176,15 @@ export const createRealtimeClient = (
   const dedupeSize = options.dedupeSize ?? 500;
   const publicNamespace = options.publicNamespace ?? '/';
   const connectPrivate = options.connectPrivate ?? options.getToken !== undefined;
+
+  let { getToken } = options;
+
   const auth = (callback: (data: object) => void): void => {
     void (async () => {
       let token: string | null | undefined;
 
       try {
-        token = await options.getToken?.();
+        token = await getToken?.();
       } catch {
         token = null;
       }
@@ -180,9 +196,16 @@ export const createRealtimeClient = (
     publicNamespace === false
       ? null
       : io(joinUrl(url, publicNamespace), { ...options.socketOptions, auth });
-  const privateSocket = connectPrivate
-    ? io(joinUrl(url, options.privateNamespace ?? '/private'), { ...options.socketOptions, auth })
-    : null;
+  // Created up front so listeners survive login() and logout(); it connects only when logged in.
+  const privateSocket = io(joinUrl(url, options.privateNamespace ?? '/private'), {
+    ...options.socketOptions,
+    autoConnect: connectPrivate && (options.socketOptions?.autoConnect ?? true),
+    auth,
+  });
+
+  let loggedIn = connectPrivate;
+
+  const sessionSocket = (): Socket | null => (loggedIn ? privateSocket : null);
   const notificationListeners = new Set<Listener<Notification>>();
   const seen = new Set<string>();
   const onNotification = (notification: Notification): void => {
@@ -228,7 +251,7 @@ export const createRealtimeClient = (
     return result.data;
   };
   const preferred = (): Socket | null =>
-    privateSocket?.connected ? privateSocket : (publicSocket ?? privateSocket);
+    privateSocket.connected && loggedIn ? privateSocket : (publicSocket ?? sessionSocket());
   // Rooms joined through `rooms.join()`, and the connection each one was joined on.
   const joined = new Map<string, Socket>();
   const joinRoom = async (room: string): Promise<{ room: string }> => {
@@ -270,7 +293,7 @@ export const createRealtimeClient = (
   const refresh = async (): Promise<void> => {
     const token = await options.refreshToken?.();
 
-    if (!token || !privateSocket?.connected) {
+    if (!token || !loggedIn || !privateSocket.connected) {
       return;
     }
 
@@ -279,14 +302,20 @@ export const createRealtimeClient = (
 
   // Reconnect after the server closed the namespace for a recoverable reason.
   let reconnectDelayMs = 0;
-  let revoked = false;
   let closed = false;
+
+  /** Whether the library should keep a connection of this scope open. */
+  const wanted = (scope: Scope): boolean => !closed && (scope === 'public' || loggedIn);
 
   interface Connection {
     state: ConnectionStatus;
     everConnected: boolean;
     // Disconnected on purpose by the library, which connects it again.
     resuming: boolean;
+    // Last handshake error, reported by login().
+    error?: string;
+    // Notified on every state change while login() waits.
+    settle?: () => void;
   }
 
   const connections: Connection[] = [];
@@ -299,6 +328,7 @@ export const createRealtimeClient = (
   let missedEvents = false;
 
   const updateStatus = (): void => {
+    const previous = status;
     const live = connections.filter((connection) => connection.state !== 'offline');
     const next: ConnectionStatus =
       closed || live.length === 0
@@ -323,7 +353,8 @@ export const createRealtimeClient = (
       return;
     }
 
-    if (everConnected) {
+    // Coming back from `connecting` (first connection, login) is not a reconnection.
+    if (everConnected && previous !== 'connecting') {
       const info = { recovered: !missedEvents };
 
       for (const listener of reconnectListeners) {
@@ -336,10 +367,15 @@ export const createRealtimeClient = (
   };
   const setState = (connection: Connection, state: ConnectionStatus): void => {
     connection.state = state;
+    connection.settle?.();
     updateStatus();
   };
-  const watch = (socket: Socket, scope: Scope): void => {
-    const connection: Connection = { state: 'connecting', everConnected: false, resuming: false };
+  const watch = (socket: Socket, scope: Scope): Connection => {
+    const connection: Connection = {
+      state: wanted(scope) ? 'connecting' : 'offline',
+      everConnected: false,
+      resuming: false,
+    };
 
     // Retry a rejected handshake once with a fresh token; getToken() is called again.
     let retriedHandshake = false;
@@ -362,6 +398,8 @@ export const createRealtimeClient = (
       setState(connection, 'connected');
     });
     socket.on('connect_error', (error) => {
+      connection.error = error.message;
+
       if (
         scope === 'private' &&
         error.message === 'unauthorized' &&
@@ -375,12 +413,15 @@ export const createRealtimeClient = (
           try {
             await refreshToken();
           } catch {
+            loggedIn = false;
             setState(connection, 'offline');
 
             return;
           }
 
-          socket.connect();
+          if (wanted(scope)) {
+            socket.connect();
+          }
         });
 
         return;
@@ -388,6 +429,10 @@ export const createRealtimeClient = (
 
       // An inactive socket was rejected by the server and does not retry on its own.
       if (!socket.active) {
+        if (scope === 'private') {
+          loggedIn = false;
+        }
+
         setState(connection, 'offline');
       }
     });
@@ -401,17 +446,14 @@ export const createRealtimeClient = (
         connection.resuming = true;
         socket.disconnect();
         setTimeout(() => {
-          if (!closed && !revoked) {
+          if (wanted(scope)) {
             socket.connect();
           }
         }, reconnectDelayMs);
       },
     );
     socket.on('disconnect', (reason) => {
-      const givenUp =
-        closed ||
-        (scope === 'private' && revoked) ||
-        (reason === 'io client disconnect' && !connection.resuming);
+      const givenUp = !wanted(scope) || (reason === 'io client disconnect' && !connection.resuming);
 
       setState(connection, givenUp ? 'offline' : 'reconnecting');
 
@@ -427,40 +469,116 @@ export const createRealtimeClient = (
             }
           }
 
-          socket.connect();
+          if (wanted(scope)) {
+            socket.connect();
+          }
         };
 
         setTimeout(() => void reconnect(), reconnectDelayMs);
       }
     });
+
+    return connection;
   };
 
   if (publicSocket) {
     watch(publicSocket, 'public');
   }
 
-  if (privateSocket) {
-    watch(privateSocket, 'private');
-    privateSocket.on(EVENTS.authExpiring, () => {
-      background(refresh);
+  const session = watch(privateSocket, 'private');
+  /** Forgets the private session: its rooms, its recovery state and a pending login(). */
+  const endSession = (): void => {
+    loggedIn = false;
+    session.everConnected = false;
+    session.resuming = false;
+
+    for (const [room, owner] of joined) {
+      if (owner === privateSocket) {
+        joined.delete(room);
+      }
+    }
+  };
+
+  let pendingLogin: Promise<void> | null = null;
+
+  const login = (nextGetToken?: RealtimeClientOptions['getToken']): Promise<void> => {
+    if (closed) {
+      return Promise.reject(new RealtimeClientError('closed'));
+    }
+
+    if (nextGetToken) {
+      getToken = nextGetToken;
+    }
+
+    if (pendingLogin) {
+      return pendingLogin;
+    }
+
+    if (loggedIn && privateSocket.connected) {
+      return Promise.resolve();
+    }
+
+    loggedIn = true;
+    session.error = undefined;
+    pendingLogin = new Promise<void>((resolve, reject) => {
+      session.settle = () => {
+        if (session.state === 'connected') {
+          resolve();
+        } else if (session.state === 'offline') {
+          reject(new RealtimeClientError(session.error ?? 'offline'));
+        } else {
+          return;
+        }
+
+        session.settle = undefined;
+        pendingLogin = null;
+      };
     });
-    privateSocket.on(EVENTS.sessionRevoked, (event: { reason?: string }) => {
-      revoked = true;
-      options.onSessionRevoked?.(event.reason);
-    });
-  }
+    setState(session, 'connecting');
+
+    if (!privateSocket.active) {
+      privateSocket.connect();
+    }
+
+    return pendingLogin;
+  };
+  const logout = (): void => {
+    endSession();
+    session.error = 'logged_out';
+    privateSocket.disconnect();
+    // A socket that never connected emits no `disconnect`.
+    setState(session, 'offline');
+  };
+
+  privateSocket.on(EVENTS.authExpiring, () => {
+    background(refresh);
+  });
+  privateSocket.on(EVENTS.sessionRevoked, (event: { reason?: string }) => {
+    endSession();
+    session.error = 'session_revoked';
+    options.onSessionRevoked?.(event.reason);
+  });
+  // No connection in use, e.g. no public namespace and logged out.
+  updateStatus();
 
   const subscribe = <T>(event: string, listener: Listener<T>): (() => void) => {
-    privateSocket?.on(event, listener);
+    privateSocket.on(event, listener);
 
     return () => {
-      privateSocket?.off(event, listener);
+      privateSocket.off(event, listener);
     };
   };
 
   return {
     public: publicSocket,
-    private: privateSocket,
+    get private() {
+      return sessionSocket();
+    },
+    get loggedIn() {
+      return loggedIn;
+    },
+    login,
+    logout,
     get status() {
       return status;
     },
@@ -490,11 +608,11 @@ export const createRealtimeClient = (
       leave: leaveRoom,
     },
     chat: {
-      send: (to, input) => request(privateSocket, EVENTS.chatSend, { ...input, to }),
+      send: (to, input) => request(sessionSocket(), EVENTS.chatSend, { ...input, to }),
       onMessage: (listener) => subscribe(EVENTS.chatMessage, listener),
       typing: (to, typing) => {
         // Volatile: a stale indicator is worse than none, so it is not buffered while offline.
-        privateSocket?.volatile.emit(EVENTS.chatTyping, { to, typing });
+        sessionSocket()?.volatile.emit(EVENTS.chatTyping, { to, typing });
       },
       onTyping: (listener) => subscribe(EVENTS.chatTyping, listener),
     },
@@ -507,7 +625,7 @@ export const createRealtimeClient = (
         callOptions.scope === 'public'
           ? publicSocket
           : callOptions.scope === 'private'
-            ? privateSocket
+            ? sessionSocket()
             : preferred();
 
       return data === undefined
@@ -517,10 +635,11 @@ export const createRealtimeClient = (
     refresh,
     close: () => {
       closed = true;
+      session.error = 'closed';
       publicSocket?.disconnect();
-      privateSocket?.disconnect();
-      // A socket that never connected emits no `disconnect`.
-      updateStatus();
+      privateSocket.disconnect();
+      // A socket that never connected emits no `disconnect`; this also rejects a pending login().
+      setState(session, 'offline');
     },
   };
 };

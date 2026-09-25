@@ -322,6 +322,23 @@ const result = await rt.call('order:track', 7); // throws RealtimeClientError(co
 
 `refreshToken` must update what `getToken` returns and return the new token.
 
+### Login and logout
+
+A single client follows the user across sign-in and sign-out, so you never have to create a new one:
+
+```ts
+const rt = createRealtimeClient(url); // guest: public connection only
+
+await rt.login(() => auth.token); // opens /private; rejects with RealtimeClientError('unauthorized')
+rt.loggedIn;                      // true
+rt.logout();                      // closes /private and keeps the public connection
+```
+
+- `login()` resolves once `/private` is connected. The `getToken` you pass replaces the one given in the options.
+- `logout()` forgets the rooms joined through `/private`. Listeners such as `chat.onMessage` are kept for the next `login()`.
+- `rt.private` is `null` while logged out. Chat and `call(..., { scope: 'private' })` reject with `unauthorized`.
+- After `session:revoked`, or when the server refuses the token, `loggedIn` goes back to `false` and `login()` can be called again.
+
 ### Connection status
 
 ```ts
