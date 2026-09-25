@@ -8,7 +8,22 @@ import {
   type JoinedRoom,
   type Notification,
   RealtimeClientError,
+  type RealtimeEvents,
 } from '../../../src/client/index.js';
+
+/** The demo server's own events: call() and on() are typed from this map. */
+interface DemoEvents extends RealtimeEvents {
+  calls: {
+    'order:track': {
+      data: number;
+      result: { orderId: number; status: string; requestedBy: string };
+    };
+    'dice:roll': { result: number };
+  };
+  events: {
+    'room:event': [event: { room: string; text: string; at: string }];
+  };
+}
 
 const USERS = [
   { key: 'ana', id: '1', name: 'Ana', about: 'admin · team red' },
@@ -101,7 +116,7 @@ const fetchToken = async (user: DemoUser): Promise<string> => {
 
   return issued;
 };
-const rt = createRealtimeClient(window.location.origin, {
+const rt = createRealtimeClient<DemoEvents>(window.location.origin, {
   getToken: () => token,
   refreshToken: async () => {
     if (!me) {
@@ -204,7 +219,7 @@ rt.onNotification((notification) => {
 // ---------------------------------------------------------------------------
 // Rooms and custom events.
 
-const joined = new Map<string, JoinedRoom>();
+const joined = new Map<string, JoinedRoom<DemoEvents>>();
 
 /**
  * While logged in, rooms are joined through the private connection, which logout() forgets.
@@ -230,7 +245,7 @@ const toggleRoom = async (room: string): Promise<void> => {
       const lobby = await rt.rooms.join(room);
 
       joined.set(room, lobby);
-      lobby.on<[{ room: string; text: string }]>('room:event', (event) => {
+      lobby.on('room:event', (event) => {
         const item = create('li');
 
         item.append(create('strong', event.room), ` ${event.text} `, create('small', time()));
@@ -246,8 +261,8 @@ const toggleRoom = async (room: string): Promise<void> => {
   render();
 };
 
-// Any server event, not only the library's: rate limiting is reported this way.
-rt.on<[{ event: string; retryAfterMs: number }]>('rate:limited', ({ event, retryAfterMs }) => {
+// Library events such as rate:limited are typed without declaring them.
+rt.on('rate:limited', ({ event, retryAfterMs }) => {
   log(`rate:limited on ${event}, retry in ${String(retryAfterMs)} ms`, 'err');
 });
 
@@ -330,7 +345,7 @@ const track = async (): Promise<void> => {
   const id = orderId;
 
   try {
-    const result = await rt.call<{ status: string; requestedBy: string }>('order:track', id);
+    const result = await rt.call('order:track', id);
 
     addCall(`order #${String(id)}: ${result.status} (asked by ${result.requestedBy})`, true);
   } catch (error) {
@@ -446,10 +461,7 @@ onClick('room-send', () =>
 );
 onClick('chat-send', sendChat);
 onClick('dice', async () => {
-  addCall(
-    `dice: ${String(await rt.call<number>('dice:roll', undefined, { scope: 'public' }))}`,
-    true,
-  );
+  addCall(`dice: ${String(await rt.call('dice:roll', undefined, { scope: 'public' }))}`, true);
 });
 onClick('track', track);
 onClick('spam', () => Promise.all(Array.from({ length: 6 }, track)));

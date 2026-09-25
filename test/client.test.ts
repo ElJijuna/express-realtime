@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   type ConnectionStatus,
   createRealtimeClient,
   type Notification,
   type RealtimeClient,
   RealtimeClientError,
+  type RealtimeEvents,
 } from '../src/client/index.js';
 import { connected, defined, sleep, startServer, type TestServer, tokenFor } from './helpers.js';
 
@@ -21,13 +22,16 @@ afterEach(async () => {
   server = undefined;
 });
 
-const client = (url: string, options: Parameters<typeof createRealtimeClient>[1] = {}) => {
-  const instance = createRealtimeClient(url, {
+const client = <M extends RealtimeEvents = RealtimeEvents>(
+  url: string,
+  options: Parameters<typeof createRealtimeClient>[1] = {},
+) => {
+  const instance = createRealtimeClient<M>(url, {
     ...options,
     socketOptions: { transports: ['websocket'], forceNew: true, ...options.socketOptions },
   });
 
-  clients.push(instance);
+  clients.push(instance as RealtimeClient);
 
   return instance;
 };
@@ -494,6 +498,102 @@ describe('createRealtimeClient', () => {
       server.io.of('/').emit('game:start', { id: 8 });
       await sleep(100);
       expect(onStart).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('typed events', () => {
+    interface AppEvents {
+      calls: {
+        sum: { data: number[]; result: number };
+        roll: { result: number };
+        maybe: { data?: string; result: string };
+      };
+      events: {
+        score: [team: string, points: number];
+      };
+    }
+
+    it('types calls from the event map', async () => {
+      server = await startServer();
+      server.rt.on('private', 'sum', ({ data }) => (data as number[]).reduce((a, b) => a + b, 0));
+      server.rt.on('public', 'roll', () => 4);
+      server.rt.on('both', 'maybe', ({ data }) => (typeof data === 'string' ? data : 'none'));
+      const ana = client<AppEvents>(server.url, { getToken: () => tokenFor('ana') });
+
+      await Promise.all([connected(defined(ana.public)), connected(defined(ana.private))]);
+      const sum = await ana.call('sum', [1, 2]);
+      const roll = await ana.call('roll', undefined, { scope: 'public' });
+
+      expectTypeOf(sum).toEqualTypeOf<number>();
+      expectTypeOf(roll).toEqualTypeOf<number>();
+      expect([sum, roll]).toEqual([3, 4]);
+      await expect(ana.call('maybe')).resolves.toBe('none');
+      await expect(ana.call('maybe', 'yes')).resolves.toBe('yes');
+
+      // Compile-time checks only: never called.
+      const unchecked = () => [
+        // @ts-expect-error: unknown handler
+        ana.call('nope'),
+        // @ts-expect-error: wrong data
+        ana.call('sum', 'text'),
+        // @ts-expect-error: data is required
+        ana.call('sum'),
+      ];
+
+      expectTypeOf(unchecked).toBeFunction();
+    });
+
+    it('types listeners, including the library events', async () => {
+      server = await startServer();
+      server.rt.rooms.define('lobby', { access: 'public' });
+      const guest = client<AppEvents>(server.url);
+      const scores: [string, number][] = [];
+
+      guest.on('score', (team, points) => {
+        expectTypeOf(team).toEqualTypeOf<string>();
+        expectTypeOf(points).toEqualTypeOf<number>();
+        scores.push([team, points]);
+      });
+      guest.on('rate:limited', (event) => {
+        expectTypeOf(event).toEqualTypeOf<{ event: string; retryAfterMs: number }>();
+      });
+      // @ts-expect-error: undeclared event
+      guest.on('nope', () => {});
+      // @ts-expect-error: wrong argument type
+      guest.on('score', (_team: number) => {});
+
+      await connected(defined(guest.public));
+      const lobby = await guest.rooms.join('lobby');
+
+      lobby.on('score', (team, points) => {
+        expectTypeOf(team).toEqualTypeOf<string>();
+        expectTypeOf(points).toEqualTypeOf<number>();
+      });
+      server.rt.rooms.emit('lobby', 'score', 'red', 2);
+      await sleep(100);
+      expect(scores).toEqual([['red', 2]]);
+    });
+
+    it('keeps the untyped signatures without an event map', () => {
+      const guest = client('http://localhost:1', { socketOptions: { autoConnect: false } });
+
+      expectTypeOf(guest.call<number>).returns.toEqualTypeOf<Promise<number>>();
+      expectTypeOf(guest.call('anything', { any: 'data' })).toEqualTypeOf<Promise<unknown>>();
+      guest.on<[string]>('anything', (value) => {
+        expectTypeOf(value).toEqualTypeOf<string>();
+      });
+    });
+
+    it('types only the declared part of the map', () => {
+      const guest = client<{ events: { ping: [] } }>('http://localhost:1', {
+        socketOptions: { autoConnect: false },
+      });
+
+      // Calls stay untyped.
+      expectTypeOf(guest.call('anything')).toEqualTypeOf<Promise<unknown>>();
+      guest.on('ping', () => {});
+      // @ts-expect-error: events are typed
+      guest.on('pong', () => {});
     });
   });
 });

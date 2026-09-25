@@ -96,8 +96,96 @@ export interface OnOptions {
   scope?: Scope;
 }
 
+export interface CallOptions {
+  /** Connection the call goes through. Default: private when connected, otherwise public. */
+  scope?: Scope;
+}
+
+/** A handler registered on the server with `rt.on()`: what it receives and what it answers. */
+export interface CallSpec {
+  /** Omit it, or make it optional, for handlers called without data. */
+  data?: unknown;
+  result?: unknown;
+}
+
+/**
+ * Types the app's own events. Pass it to `createRealtimeClient<AppEvents>()`: `call()` and `on()`
+ * then accept only these names and infer data, results and listener arguments.
+ * Each part is optional, and an omitted part stays untyped.
+ *
+ * @example
+ * ```ts
+ * interface AppEvents {
+ *   calls: {
+ *     'order:track': { data: number; result: { status: string } };
+ *     'dice:roll': { result: number };
+ *   };
+ *   events: {
+ *     score: [team: string, points: number];
+ *     'game:start': [game: { id: string }];
+ *   };
+ * }
+ * ```
+ */
+export interface RealtimeEvents {
+  /** Handlers the client calls with `call()`. */
+  calls?: Record<string, CallSpec>;
+  /** Events the server emits, as the tuple of arguments listeners receive. */
+  events?: Record<string, unknown[]>;
+}
+
+type CallsOf<M> = M extends { calls: infer C } ? C : Record<string, CallSpec>;
+type EventsOf<M> = M extends { events: infer V } ? V : Record<string, unknown[]>;
+/** Events the library itself emits, available to `on()` without declaring them. */
+type LibraryEvents = {
+  [K in keyof ServerToClientEvents]: Parameters<ServerToClientEvents[K]>;
+};
+type AllEvents<M> = Omit<LibraryEvents, keyof EventsOf<M>> & EventsOf<M>;
+type CallData<Spec> = 'data' extends keyof Spec ? Spec['data' & keyof Spec] : undefined;
+type CallResult<Spec> = 'result' extends keyof Spec ? Spec['result' & keyof Spec] : unknown;
+type CallArgs<Spec> =
+  undefined extends CallData<Spec>
+    ? [data?: CallData<Spec>, options?: CallOptions]
+    : [data: CallData<Spec>, options?: CallOptions];
+type ArgsOf<T> = T extends unknown[] ? T : [T];
+
+/** `call()` without an event map: any name, explicit result type. */
+export type UntypedCall = <Result = unknown>(
+  event: string,
+  data?: unknown,
+  options?: CallOptions,
+) => Promise<Result>;
+/** `on()` without an event map: any name, explicit argument types. */
+export type UntypedOn = <Args extends unknown[] = unknown[]>(
+  event: string,
+  listener: EventListener<Args>,
+  options?: OnOptions,
+) => () => void;
+/** `call()` for the handlers declared in `M['calls']`. */
+export type TypedCall<M extends RealtimeEvents> = <E extends keyof CallsOf<M> & string>(
+  event: E,
+  ...args: CallArgs<CallsOf<M>[E]>
+) => Promise<CallResult<CallsOf<M>[E]>>;
+/** `on()` for the events declared in `M['events']`, plus the library's own. */
+export type TypedOn<M extends RealtimeEvents> = <E extends keyof AllEvents<M> & string>(
+  event: E,
+  listener: (...args: ArgsOf<AllEvents<M>[E]>) => void,
+  options?: OnOptions,
+) => () => void;
+/** Picks the typed signature when `M` declares the part, the untyped one otherwise. */
+type CallFor<M extends RealtimeEvents> = string extends keyof CallsOf<M>
+  ? UntypedCall
+  : TypedCall<M>;
+type OnFor<M extends RealtimeEvents> = string extends keyof EventsOf<M> ? UntypedOn : TypedOn<M>;
+type RoomOnFor<M extends RealtimeEvents> = string extends keyof EventsOf<M>
+  ? <Args extends unknown[] = unknown[]>(event: string, listener: EventListener<Args>) => () => void
+  : <E extends keyof AllEvents<M> & string>(
+      event: E,
+      listener: (...args: ArgsOf<AllEvents<M>[E]>) => void,
+    ) => () => void;
+
 /** A room joined with `rooms.join()`. */
-export interface JoinedRoom {
+export interface JoinedRoom<M extends RealtimeEvents = RealtimeEvents> {
   readonly room: string;
   /**
    * Listens to a server event on the connection that joined the room, until `leave()`.
@@ -106,15 +194,12 @@ export interface JoinedRoom {
    * name sent to another room this client is in also arrives here. Use distinct event names per
    * room type, or include the room in the payload.
    */
-  on: <Args extends unknown[] = unknown[]>(
-    event: string,
-    listener: EventListener<Args>,
-  ) => () => void;
+  on: RoomOnFor<M>;
   /** Leaves the room and removes the listeners added with `on()`. */
   leave: () => Promise<{ room: string }>;
 }
 
-export interface RealtimeClient {
+export interface RealtimeClient<M extends RealtimeEvents = RealtimeEvents> {
   /** Public connection, or `null` when disabled. */
   readonly public: Socket | null;
   /** Private connection, or `null` while logged out. */
@@ -146,7 +231,7 @@ export interface RealtimeClient {
      * The room is joined again after every reconnection until `leave()` is called or the
      * server refuses it.
      */
-    join: (room: string) => Promise<JoinedRoom>;
+    join: (room: string) => Promise<JoinedRoom<M>>;
     leave: (room: string) => Promise<{ room: string }>;
   };
   chat: {
@@ -163,17 +248,12 @@ export interface RealtimeClient {
    * Listeners are kept across reconnections, `logout()` and `login()`. When the server emits
    * the same event on both namespaces, it arrives twice unless `scope` is set.
    */
-  on: <Args extends unknown[] = unknown[]>(
-    event: string,
-    listener: EventListener<Args>,
-    options?: OnOptions,
-  ) => () => void;
-  /** Calls a handler registered with `rt.on()` and unwraps its ack. */
-  call: <Result = unknown>(
-    event: string,
-    data?: unknown,
-    options?: { scope?: Scope },
-  ) => Promise<Result>;
+  on: OnFor<M>;
+  /**
+   * Calls a handler registered with `rt.on()` and unwraps its ack. Rejects with a
+   * `RealtimeClientError` carrying the handler's error code.
+   */
+  call: CallFor<M>;
   /** Asks for a fresh token and sends it with `auth:refresh`. */
   refresh: () => Promise<void>;
   /** Closes both connections. */
@@ -203,7 +283,8 @@ const joinUrl = (url: string, namespace: string): string =>
   namespace === '/' ? url : `${url.replace(/\/+$/, '')}${namespace}`;
 
 /**
- * Connects to an express-realtime server.
+ * Connects to an express-realtime server. Pass an event map (`RealtimeEvents`) as the type
+ * argument to type `call()` and `on()`.
  *
  * @example
  * ```ts
@@ -212,10 +293,10 @@ const joinUrl = (url: string, namespace: string): string =>
  * await rt.rooms.join('lobby');
  * ```
  */
-export const createRealtimeClient = (
+export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
   url: string,
   options: RealtimeClientOptions = {},
-): RealtimeClient => {
+): RealtimeClient<M> => {
   const ackTimeoutMs = options.ackTimeoutMs ?? 10_000;
   const dedupeSize = options.dedupeSize ?? 500;
   const publicNamespace = options.publicNamespace ?? '/';

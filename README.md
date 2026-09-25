@@ -340,6 +340,35 @@ await lobby.leave();               // leaves and removes the room's listeners
 - Socket.io does not tag events with the room they were sent to. `lobby.on('game:start')` also receives a `game:start` sent to another room this client is in, so use distinct event names or put the room in the payload.
 - Connection events (`connect`, `disconnect`, ...) throw an error: use `onStatusChange()` instead.
 
+### Typed events
+
+Describe your own handlers and events once, and `call()`, `on()` and `room.on()` check names, data and results:
+
+```ts
+import { createRealtimeClient, type RealtimeEvents } from 'express-realtime/client';
+
+interface AppEvents extends RealtimeEvents {
+  calls: {
+    'order:track': { data: number; result: { status: string } };
+    'dice:roll': { result: number };             // no data
+  };
+  events: {
+    score: [team: string, points: number];       // listener arguments
+  };
+}
+
+const rt = createRealtimeClient<AppEvents>(url, options);
+
+const order = await rt.call('order:track', 7);  // { status: string }
+rt.on('score', (team, points) => {});           // string, number
+rt.on('rate:limited', ({ retryAfterMs }) => {}); // library events are already typed
+rt.call('order:track', 'x');                     // ✗ type error
+rt.on('scroe', () => {});                        // ✗ type error
+```
+
+- `calls` and `events` are independent: a part you leave out stays untyped.
+- Without a type argument, `call<Result>(event, data)` and `on<Args>(event, listener)` accept any name, as before.
+
 ### Login and logout
 
 A single client follows the user across sign-in and sign-out, so you never have to create a new one:
