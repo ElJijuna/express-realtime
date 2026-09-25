@@ -118,6 +118,49 @@ describe('createRealtimeClient', () => {
     expect(ana.private?.connected).toBe(false);
   });
 
+  it('rejoins its rooms after reconnecting, except the ones it left or lost access to', async () => {
+    server = await startServer();
+    let teamOpen = true;
+
+    server.rt.rooms.define('lobby', { access: 'public' });
+    server.rt.rooms.define('hall', { access: 'public' });
+    server.rt.rooms.define('team:red', { access: 'private', canJoin: () => teamOpen });
+    const ana = client(server.url, { getToken: () => tokenFor('ana') });
+    const guest = client(server.url);
+
+    await Promise.all([connected(defined(ana.private)), connected(defined(guest.public))]);
+    await Promise.all([
+      ana.rooms.join('lobby'),
+      ana.rooms.join('hall'),
+      ana.rooms.join('team:red'),
+      guest.rooms.join('lobby'),
+    ]);
+    await ana.rooms.leave('hall');
+    teamOpen = false;
+
+    const [anaId, guestId] = [ana.private?.id, guest.public?.id];
+
+    // Without connection state recovery, the server forgets every room of these sockets.
+    server.io.of('/private').disconnectSockets(true);
+    server.io.of('/').disconnectSockets(true);
+    await sleep(300);
+    expect(ana.private?.id).not.toBe(anaId);
+    expect(guest.public?.id).not.toBe(guestId);
+
+    const rooms = async (room: string) =>
+      (await server?.rt.rooms.members(room))?.map((member) => member.socketId).sort();
+
+    await expect(rooms('lobby')).resolves.toEqual([ana.private?.id, guest.public?.id].sort());
+    await expect(rooms('hall')).resolves.toEqual([]);
+    await expect(rooms('team:red')).resolves.toEqual([]);
+
+    // A room it lost access to is forgotten: the next reconnection does not retry it.
+    teamOpen = true;
+    server.io.of('/private').disconnectSockets(true);
+    await sleep(300);
+    await expect(rooms('team:red')).resolves.toEqual([]);
+  });
+
   it('reconnects after a graceful shutdown of another pod', async () => {
     server = await startServer();
     const guest = client(server.url);

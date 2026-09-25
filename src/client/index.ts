@@ -76,7 +76,11 @@ export interface RealtimeClient {
   /** Subscribes to notifications from both connections, deduplicated by id. */
   onNotification: (listener: Listener<Notification>) => () => void;
   rooms: {
-    /** Joins through the private connection when connected, otherwise the public one. */
+    /**
+     * Joins through the private connection when connected, otherwise the public one.
+     * The room is joined again after every reconnection until `leave()` is called or the
+     * server refuses it.
+     */
     join: (room: string) => Promise<{ room: string }>;
     leave: (room: string) => Promise<{ room: string }>;
   };
@@ -198,6 +202,44 @@ export const createRealtimeClient = (
   };
   const preferred = (): Socket | null =>
     privateSocket?.connected ? privateSocket : (publicSocket ?? privateSocket);
+  // Rooms joined through `rooms.join()`, and the connection each one was joined on.
+  const joined = new Map<string, Socket>();
+  const joinRoom = async (room: string): Promise<{ room: string }> => {
+    const socket = preferred();
+    const result = await request<{ room: string }>(socket, EVENTS.roomJoin, room);
+
+    if (socket) {
+      joined.set(room, socket);
+    }
+
+    return result;
+  };
+  const leaveRoom = async (room: string): Promise<{ room: string }> => {
+    const socket = joined.get(room) ?? preferred();
+
+    joined.delete(room);
+
+    return request(socket, EVENTS.roomLeave, room);
+  };
+  /** A new server session starts with no rooms: join them again, dropping the refused ones. */
+  const rejoin = (socket: Socket): void => {
+    for (const [room, owner] of joined) {
+      if (owner !== socket) {
+        continue;
+      }
+
+      background(async () => {
+        try {
+          await request(socket, EVENTS.roomJoin, room);
+        } catch (error) {
+          // A timeout is retried on the next reconnection; a refusal is final.
+          if (error instanceof RealtimeClientError && error.code !== 'timeout') {
+            joined.delete(room);
+          }
+        }
+      });
+    }
+  };
   const refresh = async (): Promise<void> => {
     const token = await options.refreshToken?.();
 
@@ -215,6 +257,12 @@ export const createRealtimeClient = (
 
   const watch = (socket: Socket, scope: Scope): void => {
     socket.on(EVENTS.notification, onNotification);
+    socket.on('connect', () => {
+      // A recovered session kept its rooms on the server.
+      if (!socket.recovered) {
+        rejoin(socket);
+      }
+    });
     socket.on(
       EVENTS.serverShutdown,
       (event: Parameters<ServerToClientEvents['server:shutdown']>[0]) => {
@@ -293,8 +341,8 @@ export const createRealtimeClient = (
       };
     },
     rooms: {
-      join: (room) => request(preferred(), EVENTS.roomJoin, room),
-      leave: (room) => request(preferred(), EVENTS.roomLeave, room),
+      join: joinRoom,
+      leave: leaveRoom,
     },
     chat: {
       send: (to, input) => request(privateSocket, EVENTS.chatSend, { ...input, to }),
