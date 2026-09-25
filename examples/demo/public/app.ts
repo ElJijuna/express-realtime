@@ -285,32 +285,20 @@ rt.chat.onMessage((message) => {
   addChat(message, message.from === me?.id);
 });
 
-const typingFrom = new Map<string, ReturnType<typeof setTimeout>>();
-const renderTyping = (): void => {
-  const names = [...typingFrom.keys()].map(nameOf);
-
-  $('typing').textContent = names.length ? `${names.join(', ')} typing…` : '';
-};
+// Only changes arrive here: the library expires a lost "stop" and clears it on the message.
+const typingFrom = new Set<string>();
 
 rt.chat.onTyping(({ from, typing }) => {
-  clearTimeout(typingFrom.get(from));
-  typingFrom.delete(from);
-
-  // Typing events are volatile: expire the indicator in case the "stop" is lost.
   if (typing) {
-    typingFrom.set(
-      from,
-      setTimeout(() => {
-        typingFrom.delete(from);
-        renderTyping();
-      }, 4000),
-    );
+    typingFrom.add(from);
+  } else {
+    typingFrom.delete(from);
   }
 
-  renderTyping();
-});
+  const names = [...typingFrom].map(nameOf);
 
-let typingTimer: ReturnType<typeof setTimeout> | undefined;
+  $('typing').textContent = names.length ? `${names.join(', ')} typing…` : '';
+});
 
 const sendChat = async (): Promise<void> => {
   const input = $<HTMLInputElement>('chat-text');
@@ -326,7 +314,6 @@ const sendChat = async (): Promise<void> => {
 
     addChat(message, true);
     input.value = '';
-    rt.chat.typing(to, false);
   } catch (error) {
     log(`chat: ${errorCode(error)}`, 'err');
   }
@@ -469,17 +456,12 @@ onClick('spam', () => Promise.all(Array.from({ length: 6 }, track)));
 $<HTMLInputElement>('chat-text').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     void sendChat();
-
-    return;
   }
-
-  const to = $<HTMLSelectElement>('chat-to').value;
-
-  rt.chat.typing(to, true);
-  clearTimeout(typingTimer);
-  typingTimer = setTimeout(() => {
-    rt.chat.typing(to, false);
-  }, 1500);
+});
+// On every change (keys, paste, mobile input): the library throttles it and sends the "stop"
+// when idle.
+$<HTMLInputElement>('chat-text').addEventListener('input', () => {
+  rt.chat.typing($<HTMLSelectElement>('chat-to').value, true);
 });
 
 render();

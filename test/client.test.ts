@@ -596,4 +596,101 @@ describe('createRealtimeClient', () => {
       guest.on('pong', () => {});
     });
   });
+
+  describe('typing indicator', () => {
+    const fast = { throttleMs: 100, idleMs: 200, expireMs: 300 };
+    const pair = async () => {
+      server = await startServer();
+      const ana = client(server.url, {
+        getToken: () => tokenFor('ana'),
+        publicNamespace: false,
+        typing: fast,
+      });
+      const bob = client(server.url, {
+        getToken: () => tokenFor('bob'),
+        publicNamespace: false,
+        typing: fast,
+      });
+      const seen: unknown[] = [];
+      // What actually went over the wire to Bob.
+      const wire: unknown[] = [];
+
+      bob.chat.onTyping((event) => {
+        seen.push(event);
+      });
+      bob.on('chat:typing', (event) => {
+        wire.push(event);
+      });
+      await Promise.all([connected(defined(ana.private)), connected(defined(bob.private))]);
+
+      return { ana, bob, seen, wire, toBob: server.io.of('/private').to('user:2') };
+    };
+
+    it('clears an indicator whose "stop" was lost', async () => {
+      const { seen, toBob } = await pair();
+
+      toBob.emit('chat:typing', { from: '1', typing: true });
+      await sleep(150);
+      // A keep-alive postpones the expiry and is not reported again.
+      toBob.emit('chat:typing', { from: '1', typing: true });
+      await sleep(200);
+      expect(seen).toEqual([{ from: '1', typing: true }]);
+      await sleep(200);
+      expect(seen).toEqual([
+        { from: '1', typing: true },
+        { from: '1', typing: false },
+      ]);
+    });
+
+    it('clears the indicator before the message listeners run', async () => {
+      const { ana, bob, seen } = await pair();
+      const order: string[] = [];
+
+      bob.chat.onTyping(({ typing }) => order.push(`typing:${String(typing)}`));
+      bob.chat.onMessage(() => order.push('message'));
+      ana.chat.typing('2', true);
+      await sleep(50);
+      await ana.chat.send('2', { text: 'hi' });
+      await sleep(50);
+      expect(order).toEqual(['typing:true', 'typing:false', 'message']);
+      expect(seen).toHaveLength(2);
+    });
+
+    it('throttles keystrokes and stops on its own when idle', async () => {
+      const { ana, wire } = await pair();
+
+      for (let key = 0; key < 5; key += 1) {
+        ana.chat.typing('2', true);
+      }
+
+      await sleep(50);
+      expect(wire).toEqual([{ from: '1', typing: true }]);
+      await sleep(250);
+      expect(wire).toEqual([
+        { from: '1', typing: true },
+        { from: '1', typing: false },
+      ]);
+    });
+
+    it('does not send a stop after the message', async () => {
+      const { ana, wire } = await pair();
+
+      ana.chat.typing('2', true);
+      await ana.chat.send('2', { text: 'hi' });
+      await sleep(300);
+      expect(wire).toEqual([{ from: '1', typing: true }]);
+    });
+
+    it('clears indicators when the private connection drops', async () => {
+      const { bob, seen, toBob } = await pair();
+
+      toBob.emit('chat:typing', { from: '1', typing: true });
+      await sleep(50);
+      defined(bob.private).disconnect();
+      expect(seen).toEqual([
+        { from: '1', typing: true },
+        { from: '1', typing: false },
+      ]);
+    });
+  });
 });

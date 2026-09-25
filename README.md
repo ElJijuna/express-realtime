@@ -322,6 +322,22 @@ const result = await rt.call('order:track', 7); // throws RealtimeClientError(co
 
 `refreshToken` must update what `getToken` returns and return the new token.
 
+### Typing indicator
+
+```ts
+input.addEventListener('input', () => rt.chat.typing(to, true)); // on every change
+rt.chat.onTyping(({ from, typing }) => showTyping(from, typing));  // only on changes
+```
+
+The indicator cannot get stuck, even though typing events are volatile and one can be lost:
+
+- **Sender:** it sends `typing: true` at most once every `throttleMs`, which also works as a keep-alive. It sends `typing: false` on its own after `idleMs` without calls. `chat.send` needs no `false`, because the message itself clears the indicator.
+- **Receiver:** the indicator is cleared when that user's message arrives (before `onMessage` listeners run), when no news came for `expireMs` because a `false` was lost, and when the private connection drops.
+
+```ts
+createRealtimeClient(url, { typing: { throttleMs: 2000, idleMs: 3000, expireMs: 6000 } }); // defaults
+```
+
 ### Custom server events
 
 ```ts

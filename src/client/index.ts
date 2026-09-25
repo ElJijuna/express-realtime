@@ -61,6 +61,27 @@ export interface RealtimeClientOptions {
   dedupeSize?: number;
   /** Called when the server revokes the session with `rt.disconnectUser()`. */
   onSessionRevoked?: (reason?: string) => void;
+  /** Timings of the typing indicator. */
+  typing?: TypingOptions;
+}
+
+export interface TypingOptions {
+  /** Minimum time between two `typing: true` sent to the same recipient. Default: 2000 ms. */
+  throttleMs?: number;
+  /** Sends `typing: false` after this long without a `chat.typing(to, true)` call. Default: 3000 ms. */
+  idleMs?: number;
+  /**
+   * Clears an indicator received from another user after this long without news from them,
+   * in case their `typing: false` was lost. Keep it above the sender's `throttleMs`.
+   * Default: 6000 ms.
+   */
+  expireMs?: number;
+}
+
+/** Passed to `chat.onTyping()` listeners. */
+export interface TypingEvent {
+  from: string;
+  typing: boolean;
 }
 
 /** Connection a call goes through. */
@@ -240,8 +261,18 @@ export interface RealtimeClient<M extends RealtimeEvents = RealtimeEvents> {
       input: Omit<ChatSendInput<T>, 'to'>,
     ) => Promise<ChatMessage<T>>;
     onMessage: (listener: Listener<ChatMessage>) => () => void;
+    /**
+     * Call it with `true` on every keystroke: the library throttles what it sends and sends
+     * `typing: false` on its own after `typing.idleMs` without calls, or when a message is sent.
+     * Nothing is sent while disconnected.
+     */
     typing: (to: string, typing: boolean) => void;
-    onTyping: (listener: Listener<{ from: string; typing: boolean }>) => () => void;
+    /**
+     * Called when another user starts or stops typing, only on changes. The indicator is also
+     * cleared when their message arrives, when no news came for `typing.expireMs`, and when the
+     * private connection drops.
+     */
+    onTyping: (listener: Listener<TypingEvent>) => () => void;
   };
   /**
    * Listens to a server event, e.g. one sent with `rt.rooms.emit()` or the core's own `io`.
@@ -653,6 +684,118 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
 
     return connection;
   };
+  const throttleMs = options.typing?.throttleMs ?? 2000;
+  const idleMs = options.typing?.idleMs ?? 3000;
+  const expireMs = options.typing?.expireMs ?? 6000;
+  const typingListeners = new Set<Listener<TypingEvent>>();
+  // Users typing to this client, with the timer that clears their indicator.
+  const remoteTyping = new Map<string, ReturnType<typeof setTimeout>>();
+  // Recipients this client is typing to.
+  const localTyping = new Map<string, { sentAt: number; idle: ReturnType<typeof setTimeout> }>();
+  const notifyTyping = (event: TypingEvent): void => {
+    for (const listener of typingListeners) {
+      listener(event);
+    }
+  };
+  const remoteStopped = (from: string): void => {
+    const timer = remoteTyping.get(from);
+
+    if (timer === undefined) {
+      return;
+    }
+
+    clearTimeout(timer);
+    remoteTyping.delete(from);
+    notifyTyping({ from, typing: false });
+  };
+  const remoteTyped = ({ from, typing }: TypingEvent): void => {
+    if (!typing) {
+      remoteStopped(from);
+
+      return;
+    }
+
+    const wasTyping = remoteTyping.has(from);
+
+    clearTimeout(remoteTyping.get(from));
+    remoteTyping.set(
+      from,
+      setTimeout(() => {
+        remoteStopped(from);
+      }, expireMs),
+    );
+
+    if (!wasTyping) {
+      notifyTyping({ from, typing: true });
+    }
+  };
+  // Volatile: a stale indicator is worse than none, so it is not buffered while offline.
+  const emitTyping = (to: string, typing: boolean): boolean => {
+    const socket = sessionSocket();
+
+    if (!socket?.connected) {
+      return false;
+    }
+
+    socket.volatile.emit(EVENTS.chatTyping, { to, typing });
+
+    return true;
+  };
+  /** Forgets that this client is typing to `to`, optionally telling the recipient. */
+  const localStopped = (to: string, notify: boolean): void => {
+    const state = localTyping.get(to);
+
+    if (!state) {
+      return;
+    }
+
+    clearTimeout(state.idle);
+    localTyping.delete(to);
+
+    if (notify) {
+      emitTyping(to, false);
+    }
+  };
+  const typing = (to: string, isTyping: boolean): void => {
+    if (!isTyping) {
+      localStopped(to, true);
+
+      return;
+    }
+
+    const previous = localTyping.get(to);
+
+    clearTimeout(previous?.idle);
+    const state = {
+      sentAt: previous?.sentAt ?? Number.NEGATIVE_INFINITY,
+      idle: setTimeout(() => {
+        localStopped(to, true);
+      }, idleMs),
+    };
+
+    localTyping.set(to, state);
+
+    if (Date.now() - state.sentAt >= throttleMs && emitTyping(to, true)) {
+      state.sentAt = Date.now();
+    }
+  };
+  /** Clears every indicator, both ways: nothing typed on a closed connection is still true. */
+  const resetTyping = (): void => {
+    for (const to of [...localTyping.keys()]) {
+      localStopped(to, false);
+    }
+
+    for (const from of [...remoteTyping.keys()]) {
+      remoteStopped(from);
+    }
+  };
+
+  privateSocket.on(EVENTS.chatTyping, remoteTyped);
+  // Registered before any chat.onMessage listener, so the indicator clears first.
+  privateSocket.on(EVENTS.chatMessage, (message: ChatMessage) => {
+    remoteStopped(message.from);
+  });
+  privateSocket.on('disconnect', resetTyping);
 
   if (publicSocket) {
     watch(publicSocket, 'public');
@@ -664,6 +807,7 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
     loggedIn = false;
     session.everConnected = false;
     session.resuming = false;
+    resetTyping();
 
     for (const [room, owner] of joined) {
       if (owner === privateSocket) {
@@ -781,13 +925,21 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
       leave: leaveRoom,
     },
     chat: {
-      send: (to, input) => request(sessionSocket(), EVENTS.chatSend, { ...input, to }),
-      onMessage: (listener) => subscribe(EVENTS.chatMessage, listener),
-      typing: (to, typing) => {
-        // Volatile: a stale indicator is worse than none, so it is not buffered while offline.
-        sessionSocket()?.volatile.emit(EVENTS.chatTyping, { to, typing });
+      send: (to, input) => {
+        // The message clears the recipient's indicator: no `typing: false` needed.
+        localStopped(to, false);
+
+        return request(sessionSocket(), EVENTS.chatSend, { ...input, to });
       },
-      onTyping: (listener) => subscribe(EVENTS.chatTyping, listener),
+      onMessage: (listener) => subscribe(EVENTS.chatMessage, listener),
+      typing,
+      onTyping: (listener) => {
+        typingListeners.add(listener);
+
+        return () => {
+          typingListeners.delete(listener);
+        };
+      },
     },
     on,
     call: <Result = unknown>(
@@ -810,6 +962,7 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
     close: () => {
       closed = true;
       session.error = 'closed';
+      resetTyping();
       publicSocket?.disconnect();
       privateSocket.disconnect();
       // A socket that never connected emits no `disconnect`; this also rejects a pending login().
