@@ -322,6 +322,24 @@ const result = await rt.call('order:track', 7); // throws RealtimeClientError(co
 
 `refreshToken` must update what `getToken` returns and return the new token.
 
+### Custom server events
+
+```ts
+// Whatever the server sends with rt.rooms.emit() or the core's own io
+const off = rt.on<[string, number]>('score', (team, points) => {});
+rt.on('news', onNews, { scope: 'public' }); // one connection only
+off();
+
+const lobby = await rt.rooms.join('lobby');
+lobby.on('game:start', startGame); // listens on the connection that joined the room
+await lobby.leave();               // leaves and removes the room's listeners
+```
+
+- Listeners survive reconnections, `logout()` and `login()`.
+- `rt.on` listens on both connections by default, so an event the server emits on both namespaces arrives twice. Pass `scope` to avoid that.
+- Socket.io does not tag events with the room they were sent to. `lobby.on('game:start')` also receives a `game:start` sent to another room this client is in, so use distinct event names or put the room in the payload.
+- Connection events (`connect`, `disconnect`, ...) throw an error: use `onStatusChange()` instead.
+
 ### Login and logout
 
 A single client follows the user across sign-in and sign-out, so you never have to create a new one:

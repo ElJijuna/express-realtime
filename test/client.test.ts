@@ -405,4 +405,95 @@ describe('createRealtimeClient', () => {
       await expect(guest.login()).rejects.toMatchObject({ code: 'closed' });
     });
   });
+
+  describe('custom server events', () => {
+    it('receives every argument and stops after unsubscribing', async () => {
+      server = await startServer();
+      server.rt.rooms.define('lobby', { access: 'public' });
+      const guest = client(server.url);
+      const received: unknown[][] = [];
+      const off = guest.on<[string, number]>('score', (team, points) => {
+        received.push([team, points]);
+      });
+
+      await connected(defined(guest.public));
+      await guest.rooms.join('lobby');
+      server.rt.rooms.emit('lobby', 'score', 'red', 3);
+      await sleep(100);
+      off();
+      server.rt.rooms.emit('lobby', 'score', 'blue', 1);
+      await sleep(100);
+      expect(received).toEqual([['red', 3]]);
+    });
+
+    it('keeps listeners across reconnections, logout and login', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana'), publicNamespace: false });
+      const received: unknown[] = [];
+      const toAna = () => server?.io.of('/private').to('user:1').emit('ping', received.length);
+
+      ana.on('ping', (value) => {
+        received.push(value);
+      });
+      await connected(defined(ana.private));
+      toAna();
+      await sleep(50);
+
+      server.io.of('/private').disconnectSockets(true);
+      await next(ana.onReconnect);
+      toAna();
+      await sleep(50);
+
+      ana.logout();
+      await ana.login();
+      toAna();
+      await sleep(50);
+      expect(received).toEqual([0, 1, 2]);
+    });
+
+    it('listens on both connections unless a scope is given', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana') });
+      const both = vi.fn();
+      const publicOnly = vi.fn();
+
+      ana.on('news', both);
+      ana.on('news', publicOnly, { scope: 'public' });
+      await Promise.all([connected(defined(ana.public)), connected(defined(ana.private))]);
+      server.io.of('/').emit('news');
+      server.io.of('/private').emit('news');
+      await sleep(100);
+      expect(both).toHaveBeenCalledTimes(2);
+      expect(publicOnly).toHaveBeenCalledOnce();
+    });
+
+    it('refuses connection events', () => {
+      const guest = client('http://localhost:1', { socketOptions: { autoConnect: false } });
+
+      expect(() => guest.on('disconnect', () => {})).toThrow(/onStatusChange/);
+    });
+
+    it('scopes room listeners to the room lifetime', async () => {
+      server = await startServer();
+      server.rt.rooms.define('lobby', { access: 'public' });
+      const guest = client(server.url);
+      const onStart = vi.fn();
+
+      await connected(defined(guest.public));
+      const lobby = await guest.rooms.join('lobby');
+
+      expect(lobby.room).toBe('lobby');
+      lobby.on('game:start', onStart);
+      server.rt.rooms.emit('lobby', 'game:start', { id: 7 });
+      await sleep(100);
+      expect(onStart).toHaveBeenCalledWith({ id: 7 });
+
+      await expect(lobby.leave()).resolves.toEqual({ room: 'lobby' });
+      await expect(server.rt.rooms.members('lobby')).resolves.toEqual([]);
+      // Reaches the socket directly: the room listener is gone.
+      server.io.of('/').emit('game:start', { id: 8 });
+      await sleep(100);
+      expect(onStart).toHaveBeenCalledOnce();
+    });
+  });
 });

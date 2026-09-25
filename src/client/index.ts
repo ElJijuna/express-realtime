@@ -88,6 +88,31 @@ export interface ReconnectInfo {
 }
 /** Event listener. */
 export type Listener<T> = (value: T) => void;
+/** Listener for a custom server event: receives every argument the server emitted. */
+export type EventListener<Args extends unknown[] = unknown[]> = (...args: Args) => void;
+
+export interface OnOptions {
+  /** Listen on this connection only. Default: both. */
+  scope?: Scope;
+}
+
+/** A room joined with `rooms.join()`. */
+export interface JoinedRoom {
+  readonly room: string;
+  /**
+   * Listens to a server event on the connection that joined the room, until `leave()`.
+   *
+   * Socket.io does not tag events with the room they were sent to, so an event with the same
+   * name sent to another room this client is in also arrives here. Use distinct event names per
+   * room type, or include the room in the payload.
+   */
+  on: <Args extends unknown[] = unknown[]>(
+    event: string,
+    listener: EventListener<Args>,
+  ) => () => void;
+  /** Leaves the room and removes the listeners added with `on()`. */
+  leave: () => Promise<{ room: string }>;
+}
 
 export interface RealtimeClient {
   /** Public connection, or `null` when disabled. */
@@ -121,7 +146,7 @@ export interface RealtimeClient {
      * The room is joined again after every reconnection until `leave()` is called or the
      * server refuses it.
      */
-    join: (room: string) => Promise<{ room: string }>;
+    join: (room: string) => Promise<JoinedRoom>;
     leave: (room: string) => Promise<{ room: string }>;
   };
   chat: {
@@ -133,6 +158,16 @@ export interface RealtimeClient {
     typing: (to: string, typing: boolean) => void;
     onTyping: (listener: Listener<{ from: string; typing: boolean }>) => () => void;
   };
+  /**
+   * Listens to a server event, e.g. one sent with `rt.rooms.emit()` or the core's own `io`.
+   * Listeners are kept across reconnections, `logout()` and `login()`. When the server emits
+   * the same event on both namespaces, it arrives twice unless `scope` is set.
+   */
+  on: <Args extends unknown[] = unknown[]>(
+    event: string,
+    listener: EventListener<Args>,
+    options?: OnOptions,
+  ) => () => void;
   /** Calls a handler registered with `rt.on()` and unwraps its ack. */
   call: <Result = unknown>(
     event: string,
@@ -155,6 +190,15 @@ const background = (task: () => Promise<unknown>): void => {
     }
   })();
 };
+/** Emitted by socket.io-client itself: observe them with `onStatusChange()`. */
+const CONNECTION_EVENTS = new Set([
+  'connect',
+  'connect_error',
+  'disconnect',
+  'disconnecting',
+  'newListener',
+  'removeListener',
+]);
 const joinUrl = (url: string, namespace: string): string =>
   namespace === '/' ? url : `${url.replace(/\/+$/, '')}${namespace}`;
 
@@ -252,24 +296,72 @@ export const createRealtimeClient = (
   };
   const preferred = (): Socket | null =>
     privateSocket.connected && loggedIn ? privateSocket : (publicSocket ?? sessionSocket());
-  // Rooms joined through `rooms.join()`, and the connection each one was joined on.
-  const joined = new Map<string, Socket>();
-  const joinRoom = async (room: string): Promise<{ room: string }> => {
-    const socket = preferred();
-    const result = await request<{ room: string }>(socket, EVENTS.roomJoin, room);
-
-    if (socket) {
-      joined.set(room, socket);
+  const on = <Args extends unknown[]>(
+    event: string,
+    listener: EventListener<Args>,
+    onOptions: OnOptions = {},
+  ): (() => void) => {
+    if (CONNECTION_EVENTS.has(event)) {
+      throw new Error(`express-realtime: "${event}" is a connection event, use onStatusChange()`);
     }
 
-    return result;
+    const sockets = [
+      onOptions.scope === 'private' ? null : publicSocket,
+      onOptions.scope === 'public' ? null : privateSocket,
+    ].filter((socket): socket is Socket => socket !== null);
+
+    for (const socket of sockets) {
+      socket.on(event, listener);
+    }
+
+    return () => {
+      for (const socket of sockets) {
+        socket.off(event, listener);
+      }
+    };
   };
+  // Rooms joined through `rooms.join()`, and the connection each one was joined on.
+  const joined = new Map<string, Socket>();
   const leaveRoom = async (room: string): Promise<{ room: string }> => {
     const socket = joined.get(room) ?? preferred();
 
     joined.delete(room);
 
     return request(socket, EVENTS.roomLeave, room);
+  };
+  const joinRoom = async (room: string): Promise<JoinedRoom> => {
+    const socket = preferred();
+
+    await request<{ room: string }>(socket, EVENTS.roomJoin, room);
+
+    if (socket) {
+      joined.set(room, socket);
+    }
+
+    const scope: Scope = socket === privateSocket ? 'private' : 'public';
+    const listeners = new Set<() => void>();
+
+    return {
+      room,
+      on: (event, listener) => {
+        const off = on(event, listener, { scope });
+        const remove = (): void => {
+          off();
+          listeners.delete(remove);
+        };
+
+        listeners.add(remove);
+
+        return remove;
+      },
+      leave: () => {
+        for (const remove of listeners) {
+          remove();
+        }
+
+        return leaveRoom(room);
+      },
+    };
   };
   /** A new server session starts with no rooms: join them again, dropping the refused ones. */
   const rejoin = (socket: Socket): void => {
@@ -616,6 +708,7 @@ export const createRealtimeClient = (
       },
       onTyping: (listener) => subscribe(EVENTS.chatTyping, listener),
     },
+    on,
     call: <Result = unknown>(
       event: string,
       data?: unknown,
