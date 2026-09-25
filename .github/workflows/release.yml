@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test & publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create tags, GitHub releases and the CHANGELOG commit
+      issues: write # comment on released issues
+      pull-requests: write # comment on released PRs
+      id-token: write # npm provenance
+    outputs:
+      published: ${{ steps.release-check.outputs.published }}
+      version: ${{ steps.release-check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # semantic-release needs full history and tags
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Semantic release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npx semantic-release
+
+      # semantic-release tags the released commit (HEAD); no tag means nothing was published.
+      - name: Detect published release
+        id: release-check
+        run: |
+          git fetch --tags --force
+          tag="$(git tag --points-at HEAD --list 'v*' | head -n 1)"
+          if [ -n "$tag" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "Released $tag"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "No new release"
+          fi
+
+  # Mirror of the npm release. A separate job so a failure here never affects npm, which has
+  # already published by the time this runs.
+  github-packages:
+    name: Publish to GitHub Packages
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release tag carries the package.json bumped to the released version.
+          ref: v${{ needs.release.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: '@eljijuna'
+
+      - run: npm ci
+      - run: npm run build
+
+      # Only in this job: GitHub Packages requires the owner's scope and has no provenance.
+      - name: Scope the package for GitHub Packages
+        run: |
+          npm pkg set name=@eljijuna/express-realtime
+          npm pkg delete publishConfig.provenance
+
+      # Tests already ran in the release job; skip prepublishOnly.
+      - run: npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
