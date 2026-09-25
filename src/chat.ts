@@ -162,9 +162,11 @@ export const createChat = <User>(
           const to = parseRecipient(raw.to);
 
           await authorize(socket, to);
-          socket
-            .to(userRoom(to))
-            .emit(EVENTS.chatTyping, { from: socket.data.userId, typing: raw.typing === true });
+          // Volatile: dropped for recipients that cannot take it right now instead of queued.
+          socket.to(userRoom(to)).volatile.emit(EVENTS.chatTyping, {
+            from: socket.data.userId,
+            typing: raw.typing === true,
+          });
         } catch (error) {
           if (!(error instanceof RealtimeError)) {
             ctx.obs.reportError(error, {

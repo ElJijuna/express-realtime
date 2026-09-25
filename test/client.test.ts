@@ -78,6 +78,28 @@ describe('createRealtimeClient', () => {
     await expect(ana.rooms.join('nope')).rejects.toMatchObject({ code: 'forbidden' });
   });
 
+  it('drops typing indicators sent while disconnected instead of replaying them', async () => {
+    server = await startServer();
+    const ana = client(server.url, { getToken: () => tokenFor('ana'), publicNamespace: false });
+    const bob = client(server.url, { getToken: () => tokenFor('bob'), publicNamespace: false });
+    const typing: unknown[] = [];
+
+    bob.chat.onTyping((event) => {
+      typing.push(event);
+    });
+    await Promise.all([connected(defined(ana.private)), connected(defined(bob.private))]);
+    ana.private?.disconnect();
+    ana.chat.typing('2', true);
+    ana.private?.connect();
+    await connected(defined(ana.private));
+    await sleep(100);
+    expect(typing).toEqual([]);
+
+    ana.chat.typing('2', true);
+    await sleep(100);
+    expect(typing).toEqual([{ from: '1', typing: true }]);
+  });
+
   it('refreshes the token when the server warns about expiry', async () => {
     let expiresAt = Date.now() + 300;
 

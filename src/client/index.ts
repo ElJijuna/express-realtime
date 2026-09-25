@@ -348,7 +348,8 @@ export const createRealtimeClient = (
       send: (to, input) => request(privateSocket, EVENTS.chatSend, { ...input, to }),
       onMessage: (listener) => subscribe(EVENTS.chatMessage, listener),
       typing: (to, typing) => {
-        privateSocket?.emit(EVENTS.chatTyping, { to, typing });
+        // Volatile: a stale indicator is worse than none, so it is not buffered while offline.
+        privateSocket?.volatile.emit(EVENTS.chatTyping, { to, typing });
       },
       onTyping: (listener) => subscribe(EVENTS.chatTyping, listener),
     },
