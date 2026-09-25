@@ -1,5 +1,28 @@
 # express-realtime
 
+[![npm version](https://img.shields.io/npm/v/express-realtime?logo=npm&color=cb3837)](https://www.npmjs.com/package/express-realtime)
+[![npm downloads](https://img.shields.io/npm/dm/express-realtime?logo=npm)](https://www.npmjs.com/package/express-realtime)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/express-realtime)](https://bundlephobia.com/package/express-realtime)
+[![Release](https://github.com/ElJijuna/express-realtime/actions/workflows/release.yml/badge.svg)](https://github.com/ElJijuna/express-realtime/actions/workflows/release.yml)
+[![CI](https://github.com/ElJijuna/express-realtime/actions/workflows/ci.yml/badge.svg)](https://github.com/ElJijuna/express-realtime/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/express-realtime)](https://github.com/ElJijuna/express-realtime/blob/main/package.json)
+[![node](https://img.shields.io/node/v/express-realtime?logo=node.js&logoColor=white)](https://nodejs.org)
+[![types](https://img.shields.io/npm/types/express-realtime?logo=typescript&logoColor=white)](https://www.npmjs.com/package/express-realtime)
+[![semantic-release](https://img.shields.io/badge/semantic--release-conventionalcommits-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
+[![provenance](https://img.shields.io/badge/npm-provenance-2ea44f?logo=npm)](https://www.npmjs.com/package/express-realtime#provenance)
+
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-5FA04E?logo=nodedotjs&logoColor=white)
+![Express](https://img.shields.io/badge/Express-000000?logo=express&logoColor=white)
+![Socket.io](https://img.shields.io/badge/Socket.io-010101?logo=socketdotio&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-FF4438?logo=redis&logoColor=white)
+![Vitest](https://img.shields.io/badge/Vitest-6E9F18?logo=vitest&logoColor=white)
+![ESLint](https://img.shields.io/badge/ESLint-4B32C3?logo=eslint&logoColor=white)
+![Biome](https://img.shields.io/badge/Biome-60A5FA?logo=biome&logoColor=white)
+![tsup](https://img.shields.io/badge/tsup-ESM%20%2B%20CJS-f7df1e)
+![TypeDoc](https://img.shields.io/badge/TypeDoc-3178C6?logo=typescript&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
+
 A friendly layer over **your core's own Socket.io server** for Express:
 
 - notifications shaped as `{ title, message, icon, date, data }`
@@ -10,6 +33,34 @@ A friendly layer over **your core's own Socket.io server** for Express:
 - rate limiting, token revalidation and graceful shutdown
 
 The library **does not create or hide Socket.io**. It mounts on the `Server` instance your core already has. The core keeps control of the adapter, transports, CORS and its own middlewares, and the native API stays available as `rt.io`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Core["Your Express app (each pod)"]
+        Routes["Routes<br/>req.notify · req.realtime"]
+        Services["Services / listeners<br/>rt.notify.*"]
+        RT["express-realtime<br/>createRealtime(io)"]
+        IO["Your Socket.io Server<br/>(adapter, CORS, transports)"]
+        Routes --> RT
+        Services --> RT
+        RT -- mounts on --> IO
+    end
+
+    Workers["Workers / crons<br/>createRealtimeEmitter"]
+    Redis[("Redis adapter<br/>(shared between pods)")]
+
+    subgraph Clients["Browsers · express-realtime/client"]
+        Public["/ public<br/>guests"]
+        Private["/private<br/>authenticated users"]
+    end
+
+    Workers -- redis-emitter --> Redis
+    IO <--> Redis
+    IO -- notifications, rooms, welcome --> Public
+    IO <-- notifications, rooms, 1:1 chat, auth refresh --> Private
+```
 
 ## Installation
 
