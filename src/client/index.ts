@@ -65,6 +65,27 @@ export interface RealtimeClientOptions {
 
 /** Connection a call goes through. */
 export type Scope = 'public' | 'private';
+/**
+ * State of the client as a whole:
+ * - `connecting`: before the first connection.
+ * - `connected`: every connection that is still in use is connected.
+ * - `reconnecting`: a connection dropped and the client is getting it back.
+ * - `offline`: `close()` was called, or no connection will come back on its own
+ *   (revoked session, rejected handshake, reconnection attempts exhausted).
+ *
+ * A connection that is given up (e.g. `/private` after `session:revoked`) stops counting
+ * while the other one is still in use.
+ */
+export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'offline';
+/** Passed to `onReconnect()` listeners. */
+export interface ReconnectInfo {
+  /**
+   * True when every dropped connection recovered its server session (connection state
+   * recovery), so the events sent meanwhile were replayed. When false, refetch what the
+   * UI shows: the library keeps no history.
+   */
+  recovered: boolean;
+}
 /** Event listener. */
 export type Listener<T> = (value: T) => void;
 
@@ -73,6 +94,12 @@ export interface RealtimeClient {
   readonly public: Socket | null;
   /** Private connection, or `null` when not opened. */
   readonly private: Socket | null;
+  /** Current connection status. */
+  readonly status: ConnectionStatus;
+  /** Called whenever `status` changes. */
+  onStatusChange: (listener: Listener<ConnectionStatus>) => () => void;
+  /** Called when the client is connected again after `reconnecting` or `offline`. */
+  onReconnect: (listener: Listener<ReconnectInfo>) => () => void;
   /** Subscribes to notifications from both connections, deduplicated by id. */
   onNotification: (listener: Listener<Notification>) => () => void;
   rooms: {
@@ -255,18 +282,123 @@ export const createRealtimeClient = (
   let revoked = false;
   let closed = false;
 
+  interface Connection {
+    state: ConnectionStatus;
+    everConnected: boolean;
+    // Disconnected on purpose by the library, which connects it again.
+    resuming: boolean;
+  }
+
+  const connections: Connection[] = [];
+  const statusListeners = new Set<Listener<ConnectionStatus>>();
+  const reconnectListeners = new Set<Listener<ReconnectInfo>>();
+
+  let status: ConnectionStatus = 'connecting';
+  let everConnected = false;
+  // A connection came back without its server session since the last `connected` status.
+  let missedEvents = false;
+
+  const updateStatus = (): void => {
+    const live = connections.filter((connection) => connection.state !== 'offline');
+    const next: ConnectionStatus =
+      closed || live.length === 0
+        ? 'offline'
+        : live.some((connection) => connection.state === 'reconnecting')
+          ? 'reconnecting'
+          : live.some((connection) => connection.state === 'connecting')
+            ? 'connecting'
+            : 'connected';
+
+    if (next === status) {
+      return;
+    }
+
+    status = next;
+
+    for (const listener of statusListeners) {
+      listener(next);
+    }
+
+    if (next !== 'connected') {
+      return;
+    }
+
+    if (everConnected) {
+      const info = { recovered: !missedEvents };
+
+      for (const listener of reconnectListeners) {
+        listener(info);
+      }
+    }
+
+    everConnected = true;
+    missedEvents = false;
+  };
+  const setState = (connection: Connection, state: ConnectionStatus): void => {
+    connection.state = state;
+    updateStatus();
+  };
   const watch = (socket: Socket, scope: Scope): void => {
+    const connection: Connection = { state: 'connecting', everConnected: false, resuming: false };
+
+    // Retry a rejected handshake once with a fresh token; getToken() is called again.
+    let retriedHandshake = false;
+
+    connections.push(connection);
     socket.on(EVENTS.notification, onNotification);
     socket.on('connect', () => {
       // A recovered session kept its rooms on the server.
       if (!socket.recovered) {
         rejoin(socket);
       }
+
+      if (connection.everConnected && !socket.recovered) {
+        missedEvents = true;
+      }
+
+      connection.everConnected = true;
+      connection.resuming = false;
+      retriedHandshake = false;
+      setState(connection, 'connected');
+    });
+    socket.on('connect_error', (error) => {
+      if (
+        scope === 'private' &&
+        error.message === 'unauthorized' &&
+        options.refreshToken &&
+        !retriedHandshake
+      ) {
+        retriedHandshake = true;
+        const { refreshToken } = options;
+
+        background(async () => {
+          try {
+            await refreshToken();
+          } catch {
+            setState(connection, 'offline');
+
+            return;
+          }
+
+          socket.connect();
+        });
+
+        return;
+      }
+
+      // An inactive socket was rejected by the server and does not retry on its own.
+      if (!socket.active) {
+        setState(connection, 'offline');
+      }
+    });
+    socket.io.on('reconnect_failed', () => {
+      setState(connection, 'offline');
     });
     socket.on(
       EVENTS.serverShutdown,
       (event: Parameters<ServerToClientEvents['server:shutdown']>[0]) => {
         reconnectDelayMs = event.reconnectInMs;
+        connection.resuming = true;
         socket.disconnect();
         setTimeout(() => {
           if (!closed && !revoked) {
@@ -276,10 +408,23 @@ export const createRealtimeClient = (
       },
     );
     socket.on('disconnect', (reason) => {
-      if (reason === 'io server disconnect' && !closed && !revoked) {
+      const givenUp =
+        closed ||
+        (scope === 'private' && revoked) ||
+        (reason === 'io client disconnect' && !connection.resuming);
+
+      setState(connection, givenUp ? 'offline' : 'reconnecting');
+
+      if (reason === 'io server disconnect' && !givenUp) {
+        connection.resuming = true;
+
         const reconnect = async (): Promise<void> => {
           if (scope === 'private') {
-            await options.refreshToken?.();
+            try {
+              await options.refreshToken?.();
+            } catch {
+              // Reconnect anyway: a rejected handshake gets its own retry.
+            }
           }
 
           socket.connect();
@@ -303,23 +448,6 @@ export const createRealtimeClient = (
       revoked = true;
       options.onSessionRevoked?.(event.reason);
     });
-    let retriedHandshake = false;
-
-    privateSocket.on('connect', () => {
-      retriedHandshake = false;
-    });
-    privateSocket.on('connect_error', (error) => {
-      // One retry with a fresh token; getToken() is called again by the auth callback.
-      if (error.message === 'unauthorized' && options.refreshToken && !retriedHandshake) {
-        retriedHandshake = true;
-        const { refreshToken } = options;
-
-        background(async () => {
-          await refreshToken();
-          privateSocket.connect();
-        });
-      }
-    });
   }
 
   const subscribe = <T>(event: string, listener: Listener<T>): (() => void) => {
@@ -333,6 +461,23 @@ export const createRealtimeClient = (
   return {
     public: publicSocket,
     private: privateSocket,
+    get status() {
+      return status;
+    },
+    onStatusChange: (listener) => {
+      statusListeners.add(listener);
+
+      return () => {
+        statusListeners.delete(listener);
+      };
+    },
+    onReconnect: (listener) => {
+      reconnectListeners.add(listener);
+
+      return () => {
+        reconnectListeners.delete(listener);
+      };
+    },
     onNotification: (listener) => {
       notificationListeners.add(listener);
 
@@ -374,6 +519,8 @@ export const createRealtimeClient = (
       closed = true;
       publicSocket?.disconnect();
       privateSocket?.disconnect();
+      // A socket that never connected emits no `disconnect`.
+      updateStatus();
     },
   };
 };

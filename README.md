@@ -322,6 +322,21 @@ const result = await rt.call('order:track', 7); // throws RealtimeClientError(co
 
 `refreshToken` must update what `getToken` returns and return the new token.
 
+### Connection status
+
+```ts
+rt.status; // 'connecting' | 'connected' | 'reconnecting' | 'offline'
+rt.onStatusChange((status) => banner.show(status !== 'connected'));
+rt.onReconnect(({ recovered }) => {
+  if (!recovered) refetchUnread(); // events sent while disconnected were lost
+});
+```
+
+- `connected` means every connection still in use is up. `reconnecting` means one dropped and the client is getting it back (including after a graceful shutdown).
+- `offline` means `close()` was called or no connection will come back on its own: a revoked session, a rejected handshake that `refreshToken` could not fix, or exhausted reconnection attempts.
+- A connection that is given up stops counting while the other is still in use. For example, a revoked `/private` with the public connection up still reports `connected`, and `onSessionRevoked` tells you about it.
+- `recovered` is true only when every dropped connection got its server session back through connection state recovery, so the events sent meanwhile were replayed. The library keeps no history, so when it is false, refetch what the UI shows.
+
 ## Events
 
 | Server → client | Client → server (with ack) |

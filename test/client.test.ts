@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  type ConnectionStatus,
   createRealtimeClient,
   type Notification,
   type RealtimeClient,
@@ -195,5 +196,111 @@ describe('createRealtimeClient', () => {
     await sleep(300);
     expect(guest.public?.connected).toBe(true);
     expect(guest.public?.id).not.toBe(firstId);
+  });
+
+  describe('connection status', () => {
+    const track = (instance: RealtimeClient): ConnectionStatus[] => {
+      const statuses: ConnectionStatus[] = [];
+
+      instance.onStatusChange((status) => {
+        statuses.push(status);
+      });
+
+      return statuses;
+    };
+
+    it('goes from connecting to connected once both connections are up', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana') });
+      const statuses = track(ana);
+
+      expect(ana.status).toBe('connecting');
+      await Promise.all([connected(defined(ana.public)), connected(defined(ana.private))]);
+      expect(ana.status).toBe('connected');
+      expect(statuses).toEqual(['connected']);
+
+      ana.close();
+      expect(ana.status).toBe('offline');
+      expect(statuses).toEqual(['connected', 'offline']);
+    });
+
+    it('reports reconnecting and calls onReconnect without recovery', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana') });
+
+      await Promise.all([connected(defined(ana.public)), connected(defined(ana.private))]);
+      const statuses = track(ana);
+      const reconnected = next(ana.onReconnect);
+
+      server.io.of('/private').disconnectSockets(true);
+      await expect(reconnected).resolves.toEqual({ recovered: false });
+      expect(statuses).toEqual(['reconnecting', 'connected']);
+    });
+
+    it('reports recovered reconnections', async () => {
+      server = await startServer({}, undefined, {
+        connectionStateRecovery: { maxDisconnectionDuration: 10_000 },
+      });
+      const guest = client(server.url);
+
+      await connected(defined(guest.public));
+      // Recovery needs the offset of a received event.
+      const first = next(guest.onNotification);
+
+      server.rt.notify.broadcastPublic({ title: 'Before', message: 'm' });
+      await first;
+      const reconnected = next(guest.onReconnect);
+
+      // A transport failure, unlike a server-side disconnect, keeps the session.
+      guest.public?.io.engine.close();
+      await expect(reconnected).resolves.toEqual({ recovered: true });
+      expect(guest.status).toBe('connected');
+    });
+
+    it('stays reconnecting through a graceful shutdown', async () => {
+      server = await startServer();
+      const guest = client(server.url);
+
+      await connected(defined(guest.public));
+      const statuses = track(guest);
+      const reconnected = next(guest.onReconnect);
+
+      server.io.of('/').emit('server:shutdown', { reconnectInMs: 20 });
+      await reconnected;
+      expect(statuses).toEqual(['reconnecting', 'connected']);
+    });
+
+    it('ignores a revoked private connection while the public one is in use', async () => {
+      server = await startServer();
+      const ana = client(server.url, { getToken: () => tokenFor('ana') });
+      const bob = client(server.url, { getToken: () => tokenFor('bob'), publicNamespace: false });
+
+      await Promise.all([
+        connected(defined(ana.public)),
+        connected(defined(ana.private)),
+        connected(defined(bob.private)),
+      ]);
+      server.rt.disconnectUser('1', 'logout');
+      server.rt.disconnectUser('2', 'logout');
+      await sleep(200);
+      expect(ana.status).toBe('connected');
+      expect(bob.status).toBe('offline');
+    });
+
+    it('goes offline when the handshake is rejected and cannot be refreshed', async () => {
+      server = await startServer();
+      const refreshToken = vi.fn(() => 'token:nobody');
+      const eve = client(server.url, {
+        getToken: () => 'token:nobody',
+        refreshToken,
+        publicNamespace: false,
+      });
+      const statuses = track(eve);
+
+      await sleep(300);
+      expect(refreshToken).toHaveBeenCalledOnce();
+      expect(eve.status).toBe('offline');
+      expect(statuses).toEqual(['offline']);
+    });
   });
 });

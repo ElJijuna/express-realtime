@@ -1,7 +1,7 @@
 import { createServer, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express, { type Express } from 'express';
-import { Server } from 'socket.io';
+import { Server, type ServerOptions } from 'socket.io';
 import { type Socket as ClientSocket, io as connect } from 'socket.io-client';
 import { createRealtime, type Realtime, type RealtimeOptions } from '../src/index.js';
 
@@ -43,12 +43,13 @@ export interface TestServer {
 export const startServer = async (
   options: Partial<RealtimeOptions<TestUser>> = {},
   configure?: (io: Server, app: Express) => void,
+  serverOptions: Partial<ServerOptions> = {},
 ): Promise<TestServer> => {
   const app = express();
 
   app.use(express.json());
   const http = createServer(app);
-  const io = new Server(http);
+  const io = new Server(http, serverOptions);
 
   configure?.(io, app);
   const rt = createRealtime<TestUser>(io, {
