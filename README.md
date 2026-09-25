@@ -382,6 +382,14 @@ rt.onReconnect(({ recovered }) => {
 
 `ServerToClientEvents` and `ClientToServerEvents` are exported so you can type your own `io` or `socket.io-client`.
 
+## Live demo
+
+```bash
+npm run demo   # http://localhost:3000 (PORT to change it)
+```
+
+Open it in two or more tabs and log in as different users (Ana is an admin in team red, Bob is in team red, Eve is in team blue). The page shows every feature: connection status and recovery, login/logout and token refresh, notifications, rooms with custom events, 1:1 chat with typing, handlers and rate limiting, and session revocation. The server is [examples/demo/server.ts](examples/demo/server.ts). The page, [examples/demo/public/app.ts](examples/demo/public/app.ts), is bundled with esbuild on every request, so edit it and reload.
+
 ## Development
 
 ```bash
@@ -390,6 +398,7 @@ REDIS_URL=redis://localhost:6379 npm test    # + cluster tests
 npm run lint && npm run format:check && npm run typecheck
 npm run docs                                 # TypeDoc into docs/
 npm run example                              # example server; then npm run example:client
+npm run demo                                 # live demo in the browser
 ```
 
 Tooling (ESLint, Biome, TypeScript, Vitest and TypeDoc) extends [`super-configs`](https://www.npmjs.com/package/super-configs).

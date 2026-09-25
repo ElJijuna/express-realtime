@@ -39,7 +39,7 @@
     },
     "scripts": {
         "build": "tsup",
-        "typecheck": "tsc --noEmit",
+        "typecheck": "tsc --noEmit && tsc --noEmit -p examples/demo/public",
         "lint": "eslint .",
         "lint:fix": "eslint . --fix",
         "format": "biome check --write .",
@@ -50,7 +50,8 @@
         "example": "tsx examples/server.ts",
         "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build",
         "check": "npm run lint && npm run format:check",
-        "example:client": "tsx examples/client.ts"
+        "example:client": "tsx examples/client.ts",
+        "demo": "tsx examples/demo/server.ts"
     },
     "peerDependencies": {
         "@socket.io/redis-emitter": ">=5.1.0",
@@ -81,6 +82,7 @@
         "@types/express": "^5.0.6",
         "@types/node": "^26.6.2",
         "@types/supertest": "^7.2.1",
+        "esbuild": "^0.27.7",
         "eslint": "^10.11.0",
         "express": "^5.2.1",
         "redis": "^6.2.1",

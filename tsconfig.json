@@ -17,5 +17,6 @@
         "examples/**/*.ts",
         "*.config.ts",
         "super-configs.d.ts"
-    ]
+    ],
+    "exclude": ["examples/demo/public"]
 }

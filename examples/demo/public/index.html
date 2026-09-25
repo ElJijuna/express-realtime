@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>express-realtime demo</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --text: #1d2330;
+        --muted: #677084;
+        --border: #e2e5eb;
+        --accent: #3b5bdb;
+        --ok: #2b8a3e;
+        --warn: #d97706;
+        --err: #c92a2a;
+        --info: #1971c2;
+        --code: #eef1f6;
+        color-scheme: light dark;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111418;
+          --card: #1a1e24;
+          --text: #e6e9ef;
+          --muted: #8d95a5;
+          --border: #2a3039;
+          --accent: #748ffc;
+          --ok: #51cf66;
+          --warn: #fcc419;
+          --err: #ff6b6b;
+          --info: #4dabf7;
+          --code: #232830;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+        background: var(--card);
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+      header h1 { font-size: 16px; margin: 0 auto 0 0; }
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 16px;
+        padding: 16px 20px 40px;
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+      section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 0;
+      }
+      section.wide { grid-column: 1 / -1; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0; }
+      p.hint { margin: 0; color: var(--muted); font-size: 12.5px; }
+      code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      button, input, select {
+        font: inherit;
+        color: inherit;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 6px 11px;
+      }
+      input { flex: 1; min-width: 0; }
+      button { cursor: pointer; }
+      button:hover:not(:disabled):not(.active) { border-color: var(--accent); color: var(--accent); }
+      button:disabled { opacity: 0.45; cursor: default; }
+      button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+      .status-connected .dot { background: var(--ok); }
+      .status-connecting .dot, .status-reconnecting .dot { background: var(--warn); animation: pulse 1s infinite; }
+      .status-offline .dot { background: var(--err); }
+      @keyframes pulse { 50% { opacity: 0.3; } }
+      .list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-height: 260px;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .list li { border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 6px 9px; }
+      .list li small { color: var(--muted); }
+      .list li.level-info { border-left-color: var(--info); }
+      .list li.level-success { border-left-color: var(--ok); }
+      .list li.level-warning { border-left-color: var(--warn); }
+      .list li.level-error { border-left-color: var(--err); }
+      .chat li.mine { align-self: flex-end; border-left-width: 1px; border-right: 3px solid var(--accent); }
+      .chat li { align-self: flex-start; max-width: 85%; }
+      #typing { min-height: 18px; color: var(--muted); font-style: italic; font-size: 12.5px; }
+      #log {
+        font: 12px/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
+        background: var(--code);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin: 0;
+        height: 220px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #log .t { color: var(--muted); }
+      #log .err { color: var(--err); }
+      #log .ok { color: var(--ok); }
+      #toasts {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 3;
+        max-width: min(340px, calc(100vw - 32px));
+        pointer-events: none;
+      }
+      #toasts > div {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--info);
+        border-radius: 8px;
+        padding: 9px 12px;
+        box-shadow: 0 6px 20px rgb(0 0 0 / 0.15);
+        animation: slide 0.2s ease-out;
+      }
+      @keyframes slide { from { transform: translateY(8px); opacity: 0; } }
+      .online span { margin-right: 10px; }
+      @media (max-width: 520px) {
+        header, main { padding-left: 16px; padding-right: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>express-realtime · live demo</h1>
+      <span id="status" class="pill status-connecting"><span class="dot"></span><span>connecting</span></span>
+      <span id="who" class="pill">guest</span>
+    </header>
+
+    <main>
+      <section>
+        <h2>Session</h2>
+        <p class="hint">
+          <code>rt.login()</code> / <code>rt.logout()</code> on the same client. Open another tab as a
+          different user to chat. Tokens expire in 90 s and refresh on <code>auth:expiring</code>.
+        </p>
+        <div class="row" id="users"></div>
+        <div class="row">
+          <button type="button" id="logout" disabled>Log out</button>
+          <button type="button" id="revoke" disabled>Revoke session (server)</button>
+        </div>
+        <div class="online hint" id="online"></div>
+      </section>
+
+      <section>
+        <h2>Connection</h2>
+        <p class="hint">
+          <code>rt.status</code>, <code>onStatusChange</code> and <code>onReconnect</code>. A transport drop
+          recovers the session; a server disconnect does not, so rooms are joined again.
+        </p>
+        <div class="row">
+          <button type="button" id="drop">Drop transport (recoverable)</button>
+          <button type="button" id="restart">Server disconnect (not recoverable)</button>
+        </div>
+        <div class="hint" id="sockets"></div>
+      </section>
+
+      <section>
+        <h2>Notifications</h2>
+        <p class="hint">Deduplicated by id across both connections and your tabs.</p>
+        <div class="row">
+          <input id="announce-text" placeholder="Announcement for everyone" />
+          <button type="button" id="announce">Broadcast</button>
+        </div>
+        <div class="row">
+          <button type="button" id="notify-me" disabled>Notify all my tabs</button>
+          <button type="button" id="notify-admins" disabled>Notify admins</button>
+        </div>
+        <ul class="list" id="notifications"></ul>
+      </section>
+
+      <section>
+        <h2>Rooms</h2>
+        <p class="hint">
+          <code>lobby</code> is public. <code>team:red</code> is for Ana and Bob, <code>team:blue</code> for
+          Eve. Room events arrive through <code>room.on()</code>.
+        </p>
+        <div class="row" id="rooms"></div>
+        <div class="row">
+          <input id="room-text" placeholder="Message for room:event" />
+          <select id="room-target"></select>
+          <button type="button" id="room-send">Emit</button>
+        </div>
+        <ul class="list" id="room-events"></ul>
+      </section>
+
+      <section>
+        <h2>1:1 chat</h2>
+        <p class="hint"><code>chat.send</code>, <code>chat.onMessage</code> and the typing indicator.</p>
+        <div class="row">
+          <select id="chat-to"></select>
+          <input id="chat-text" placeholder="Log in to chat" disabled />
+          <button type="button" id="chat-send" disabled>Send</button>
+        </div>
+        <div id="typing"></div>
+        <ul class="list chat" id="chat"></ul>
+      </section>
+
+      <section>
+        <h2>Handlers</h2>
+        <p class="hint">
+          <code>rt.call()</code> to handlers registered with <code>rt.on()</code> on the server.
+          <code>order:track</code> is private and rate limited to 3 calls every 5 s.
+        </p>
+        <div class="row">
+          <button type="button" id="dice">Roll dice (public)</button>
+          <button type="button" id="track">Track order (private)</button>
+          <button type="button" id="spam">Track ×6 (hit the rate limit)</button>
+        </div>
+        <ul class="list" id="calls"></ul>
+      </section>
+
+      <section class="wide">
+        <h2>Event log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <div id="toasts"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
