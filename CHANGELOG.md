@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/ElJijuna/express-realtime/compare/v1.1.0...v1.2.0) (2026-10-15)
+
+
+### Features
+
+* add room typing indicators with throttling and idle management ([322e91a](https://github.com/ElJijuna/express-realtime/commit/322e91afc43e4c01652239c2ce47d7b4522d51f7))
+
 # [1.1.0](https://github.com/ElJijuna/express-realtime/compare/v1.0.0...v1.1.0) (2026-09-25)
 
 
