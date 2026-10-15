@@ -10,6 +10,7 @@ export const EVENTS = {
   chatMessage: 'chat:message',
   chatSend: 'chat:send',
   chatTyping: 'chat:typing',
+  roomTyping: 'room:typing',
   roomJoin: 'room:join',
   roomLeave: 'room:leave',
   authRefresh: 'auth:refresh',

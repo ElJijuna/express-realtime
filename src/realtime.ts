@@ -39,6 +39,7 @@ export interface Realtime<User> {
 }
 
 const LIBRARY_CLIENT_EVENTS = [
+  EVENTS.roomTyping,
   EVENTS.roomJoin,
   EVENTS.roomLeave,
   EVENTS.chatSend,

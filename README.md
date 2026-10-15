@@ -338,6 +338,27 @@ The indicator cannot get stuck, even though typing events are volatile and one c
 createRealtimeClient(url, { typing: { throttleMs: 2000, idleMs: 3000, expireMs: 6000 } }); // defaults
 ```
 
+### Room typing indicators
+
+Works for authenticated users and guests, independently of 1:1 chat:
+
+```ts
+const room = await rt.rooms.join('lobby');
+input.addEventListener('input', () => room.typing(input.value.length > 0));
+const off = room.onTyping((participants) => {
+  // [{ id: '42', kind: 'user' }, { id: 'socket-id', kind: 'guest' }]
+  renderTyping(participants);
+});
+// When sending your custom group message:
+room.typing(false);
+```
+
+- `onTyping` immediately receives the current list, then updates when it changes. The app resolves display names. Calling `off()` unsubscribes.
+- Each room tracks its own list. Multiple connections of an authenticated user produce one entry; guests are identified by socket id. The sending connection does not receive its own event; other tabs can observe it.
+- Uses the same `typing` timings as 1:1 chat: throttling, automatic idle stop, and expiry if a stop is lost. Activity is ephemeral, without history or an initial server snapshot.
+- Only members can emit; identity comes from the server. Events stay in the namespace used to join the room, including public rooms. Guests and authenticated clients must join through the same namespace to see each other.
+- Leaving removes typing subscriptions and clears state. Disconnect clears activity, and reconnect does not replay it. Call `typing(false)` when sending a group message, since custom message events are application-defined.
+
 ### Custom server events
 
 ```ts
@@ -421,7 +442,7 @@ rt.onReconnect(({ recovered }) => {
 
 | Server → client | Client → server (with ack) |
 | --------------- | -------------------------- |
-| `notification`, `chat:message`, `chat:typing` | `room:join`, `room:leave` |
+| `notification`, `chat:message`, `chat:typing`, `room:typing` | `room:join`, `room:leave`, `room:typing` (no ack) |
 | `auth:expiring`, `auth:expired`, `session:revoked` | `chat:send`, `chat:typing` (no ack) |
 | `rate:limited`, `server:shutdown` | `auth:refresh` |
 

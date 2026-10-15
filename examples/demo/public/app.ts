@@ -220,6 +220,10 @@ rt.onNotification((notification) => {
 // Rooms and custom events.
 
 const joined = new Map<string, JoinedRoom<DemoEvents>>();
+const roomTypingLabels = new Map<string, string>();
+const renderRoomTyping = (): void => {
+  $('room-typing').textContent = [...roomTypingLabels.values()].filter(Boolean).join(' · ');
+};
 
 /**
  * While logged in, rooms are joined through the private connection, which logout() forgets.
@@ -245,6 +249,16 @@ const toggleRoom = async (room: string): Promise<void> => {
       const lobby = await rt.rooms.join(room);
 
       joined.set(room, lobby);
+      lobby.onTyping((participants) => {
+        const names = participants.map((participant) =>
+          participant.kind === 'user'
+            ? nameOf(participant.id)
+            : `Guest ${participant.id.slice(0, 4)}`,
+        );
+
+        roomTypingLabels.set(room, names.length ? `${room}: ${names.join(', ')} typing…` : '');
+        renderRoomTyping();
+      });
       lobby.on('room:event', (event) => {
         const item = create('li');
 
@@ -441,11 +455,23 @@ onClick('notify-admins', async () => {
 
   log(`notified admins (HTTP ${String(response.status)})`);
 });
-onClick('room-send', () =>
-  post(`/api/rooms/${encodeURIComponent($<HTMLSelectElement>('room-target').value)}/event`, {
+onClick('room-send', () => {
+  joined.get($<HTMLSelectElement>('room-target').value)?.typing(false);
+
+  return post(`/api/rooms/${encodeURIComponent($<HTMLSelectElement>('room-target').value)}/event`, {
     text: $<HTMLInputElement>('room-text').value,
-  }),
-);
+  });
+});
+$<HTMLInputElement>('room-text').addEventListener('input', (event) => {
+  joined
+    .get($<HTMLSelectElement>('room-target').value)
+    ?.typing((event.target as HTMLInputElement).value.length > 0);
+});
+$('room-target').addEventListener('change', () => {
+  for (const handle of joined.values()) {
+    handle.typing(false);
+  }
+});
 onClick('chat-send', sendChat);
 onClick('dice', async () => {
   addCall(`dice: ${String(await rt.call('dice:roll', undefined, { scope: 'public' }))}`, true);

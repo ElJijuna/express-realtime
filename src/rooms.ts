@@ -220,6 +220,40 @@ export const createRooms = <User>(
     },
 
     attach(socket) {
+      socket.on(EVENTS.roomTyping, (raw: unknown) => {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return;
+        }
+
+        const { room, typing } = raw as Record<string, unknown>;
+
+        try {
+          const name = assertValidName(room);
+
+          if (typeof typing !== 'boolean' || !socket.rooms.has(name)) {
+            return;
+          }
+
+          const { userId } = socket.data;
+
+          socket.to(name).volatile.emit(EVENTS.roomTyping, {
+            room: name,
+            typing,
+            socketId: socket.id,
+            participant:
+              userId === null ? { id: socket.id, kind: 'guest' } : { id: userId, kind: 'user' },
+          });
+        } catch (error) {
+          if (!(error instanceof RealtimeError)) {
+            ctx.obs.reportError(error, {
+              scope: 'room',
+              event: EVENTS.roomTyping,
+              socketId: socket.id,
+            });
+          }
+        }
+      });
+
       socket.on(
         EVENTS.roomJoin,
         withAck(ctx, socket, EVENTS.roomJoin, async (raw) => {

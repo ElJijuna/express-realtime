@@ -85,9 +85,24 @@ export type RealtimeErrorCode =
   | 'internal_error'
   | 'server_shutting_down';
 
+/** Identity of a participant currently typing in a room. */
+export interface TypingParticipant {
+  id: string;
+  kind: 'user' | 'guest';
+}
+
+/** Room activity is tracked per connection and grouped by participant on the client. */
+export interface RoomTypingEvent {
+  room: string;
+  participant: TypingParticipant;
+  socketId: string;
+  typing: boolean;
+}
+
 /** Events the server emits to clients. */
 export interface ServerToClientEvents {
   notification: (notification: Notification) => void;
+  'room:typing': (event: RoomTypingEvent) => void;
   'chat:message': (message: ChatMessage) => void;
   'chat:typing': (event: { from: string; typing: boolean }) => void;
   'auth:expiring': (event: { expiresAt: string }) => void;
@@ -99,6 +114,7 @@ export interface ServerToClientEvents {
 
 /** Events clients emit to the server. */
 export interface ClientToServerEvents {
+  'room:typing': (event: { room: string; typing: boolean }) => void;
   'room:join': (room: string, ack?: (result: Ack<{ room: string }>) => void) => void;
   'room:leave': (room: string, ack?: (result: Ack<{ room: string }>) => void) => void;
   'chat:send': (input: ChatSendInput, ack?: (result: Ack<ChatMessage>) => void) => void;

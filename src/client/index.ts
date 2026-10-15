@@ -11,8 +11,10 @@ import type {
   ChatSendInput,
   Notification,
   ServerToClientEvents,
+  TypingParticipant,
 } from '../contract.js';
 import { EVENTS } from '../events.js';
+import { createRoomTyping } from './room-typing.js';
 
 export type {
   Ack,
@@ -23,7 +25,9 @@ export type {
   NotificationLevel,
   NotificationSender,
   RealtimeErrorCode,
+  RoomTypingEvent,
   ServerToClientEvents,
+  TypingParticipant,
 } from '../contract.js';
 
 /** A value or a promise of it. */
@@ -61,17 +65,17 @@ export interface RealtimeClientOptions {
   dedupeSize?: number;
   /** Called when the server revokes the session with `rt.disconnectUser()`. */
   onSessionRevoked?: (reason?: string) => void;
-  /** Timings of the typing indicator. */
+  /** Shared timings for direct chat and room typing indicators. */
   typing?: TypingOptions;
 }
 
 export interface TypingOptions {
-  /** Minimum time between two `typing: true` sent to the same recipient. Default: 2000 ms. */
+  /** Minimum time between two `typing: true` sent to the same recipient or room. Default: 2000 ms. */
   throttleMs?: number;
-  /** Sends `typing: false` after this long without a `chat.typing(to, true)` call. Default: 3000 ms. */
+  /** Sends `typing: false` after this long without a `chat.typing(to, true)` or `room.typing(true)` call. Default: 3000 ms. */
   idleMs?: number;
   /**
-   * Clears an indicator received from another user after this long without news from them,
+   * Clears an indicator received from another connection after this long without news from them,
    * in case their `typing: false` was lost. Keep it above the sender's `throttleMs`.
    * Default: 6000 ms.
    */
@@ -208,6 +212,10 @@ type RoomOnFor<M extends RealtimeEvents> = string extends keyof EventsOf<M>
 /** A room joined with `rooms.join()`. */
 export interface JoinedRoom<M extends RealtimeEvents = RealtimeEvents> {
   readonly room: string;
+  /** Call on input; throttled and stopped automatically after inactivity. */
+  typing: (active: boolean) => void;
+  /** Immediately receives the current list, then updates only when it changes. */
+  onTyping: (listener: Listener<TypingParticipant[]>) => () => void;
   /**
    * Listens to a server event on the connection that joined the room, until `leave()`.
    *
@@ -216,7 +224,7 @@ export interface JoinedRoom<M extends RealtimeEvents = RealtimeEvents> {
    * room type, or include the room in the payload.
    */
   on: RoomOnFor<M>;
-  /** Leaves the room and removes the listeners added with `on()`. */
+  /** Leaves the room and removes its custom event and typing listeners. */
   leave: () => Promise<{ room: string }>;
 }
 
@@ -434,9 +442,15 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
   };
   // Rooms joined through `rooms.join()`, and the connection each one was joined on.
   const joined = new Map<string, Socket>();
+  const roomTyping = new Map<string, ReturnType<typeof createRoomTyping>>();
+  const forgetRoomTyping = (room: string): void => {
+    roomTyping.get(room)?.dispose();
+    roomTyping.delete(room);
+  };
   const leaveRoom = async (room: string): Promise<{ room: string }> => {
     const socket = joined.get(room) ?? preferred();
 
+    forgetRoomTyping(room);
     joined.delete(room);
 
     return request(socket, EVENTS.roomLeave, room);
@@ -447,7 +461,27 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
     await request<{ room: string }>(socket, EVENTS.roomJoin, room);
 
     if (socket) {
+      if (joined.has(room) && joined.get(room) !== socket) {
+        forgetRoomTyping(room);
+      }
+
       joined.set(room, socket);
+    }
+
+    let activity = roomTyping.get(room);
+
+    if (socket && !activity) {
+      activity = createRoomTyping(
+        socket,
+        room,
+        {
+          throttleMs: options.typing?.throttleMs ?? 2000,
+          idleMs: options.typing?.idleMs ?? 3000,
+          expireMs: options.typing?.expireMs ?? 6000,
+        },
+        () => joined.get(room) === socket,
+      );
+      roomTyping.set(room, activity);
     }
 
     const scope: Scope = socket === privateSocket ? 'private' : 'public';
@@ -455,6 +489,8 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
 
     return {
       room,
+      typing: (value) => activity?.typing(value),
+      onTyping: (listener) => activity?.onTyping(listener) ?? (() => {}),
       on: (event, listener) => {
         const off = on(event, listener, { scope });
         const remove = (): void => {
@@ -488,6 +524,7 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
         } catch (error) {
           // A timeout is retried on the next reconnection; a refusal is final.
           if (error instanceof RealtimeClientError && error.code !== 'timeout') {
+            forgetRoomTyping(room);
             joined.delete(room);
           }
         }
@@ -811,6 +848,7 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
 
     for (const [room, owner] of joined) {
       if (owner === privateSocket) {
+        forgetRoomTyping(room);
         joined.delete(room);
       }
     }
@@ -960,6 +998,10 @@ export const createRealtimeClient = <M extends RealtimeEvents = RealtimeEvents>(
     },
     refresh,
     close: () => {
+      for (const room of roomTyping.keys()) {
+        forgetRoomTyping(room);
+      }
+
       closed = true;
       session.error = 'closed';
       resetTyping();

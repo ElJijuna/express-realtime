@@ -15,7 +15,9 @@ export type {
   NotificationLevel,
   NotificationSender,
   RealtimeErrorCode,
+  RoomTypingEvent,
   ServerToClientEvents,
+  TypingParticipant,
 } from './contract.js';
 export {
   createRealtimeEmitter,

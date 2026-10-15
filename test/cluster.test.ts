@@ -100,6 +100,29 @@ describe.skipIf(!REDIS_URL)('cluster (Redis adapter)', () => {
     await expect(roomWelcome).resolves.toMatchObject({ title: 'Room synced' });
   });
 
+  it('relays room typing across pods in the same namespace', async () => {
+    const [podA, podB] = [await pod(), await pod()];
+
+    for (const server of [podA, podB]) {
+      server.rt.rooms.define('lobby', { access: 'public' });
+    }
+
+    const ana = podA.connect('/private', tokenFor('ana'));
+    const bob = podB.connect('/private', tokenFor('bob'));
+
+    await Promise.all([connected(ana), connected(bob)]);
+    await Promise.all([ana, bob].map((socket) => socket.emitWithAck('room:join', 'lobby')));
+    const event = waitFor(bob, 'room:typing');
+
+    ana.emit('room:typing', { room: 'lobby', typing: true });
+    await expect(event).resolves.toEqual({
+      room: 'lobby',
+      typing: true,
+      socketId: ana.id,
+      participant: { id: '1', kind: 'user' },
+    });
+  });
+
   it('reaches sockets from a worker through the Redis emitter', async () => {
     const podB = await pod();
     const bob = podB.connect('/private', tokenFor('bob'));
